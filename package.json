@@ -1,1 +1,13 @@
-
+{
+  "name": "helvarix-advanced-fabricator",
+  "private": true,
+  "version": "0.0.1",
+  "scripts": {
+    "dev:web": "pnpm --filter web dev",
+    "dev:api": "pnpm --filter api dev",
+    "build": "turbo build"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0"
+  }
+}
