@@ -75,10 +75,19 @@ export function SidebarSection({ title, children }: Children & { title: string }
 export function BlackButton({
   children,
   subdued = false,
+  onClick,
+  disabled = false,
   style
-}: Children & { subdued?: boolean; style?: CSSProperties }) {
+}: Children & {
+  subdued?: boolean;
+  onClick?: () => void;
+  disabled?: boolean;
+  style?: CSSProperties;
+}) {
   return (
     <button
+      onClick={onClick}
+      disabled={disabled}
       style={{
         width: "100%",
         background: subdued ? "rgba(17,17,17,0.88)" : theme.black,
@@ -89,7 +98,8 @@ export function BlackButton({
         textTransform: "uppercase",
         letterSpacing: "0.08em",
         fontSize: 12,
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.72 : 1,
         ...style
       }}
     >
@@ -100,19 +110,22 @@ export function BlackButton({
 
 export function InputField({
   label,
-  defaultValue,
-  type = "text"
+  value,
+  type = "text",
+  onChange
 }: {
   label: string;
-  defaultValue?: string | number;
+  value?: string | number;
   type?: string;
+  onChange?: (value: string) => void;
 }) {
   return (
     <label style={{ display: "grid", gap: 6 }}>
       <span style={{ fontSize: 12, color: theme.muted }}>{label}</span>
       <input
         type={type}
-        defaultValue={defaultValue}
+        value={value}
+        onChange={(event) => onChange?.(event.target.value)}
         style={{
           width: "100%",
           height: 38,
@@ -130,17 +143,20 @@ export function InputField({
 export function SelectField({
   label,
   defaultValue,
-  options
+  options,
+  onChange
 }: {
   label: string;
   defaultValue?: string;
   options: Array<{ label: string; value: string }>;
+  onChange?: (value: string) => void;
 }) {
   return (
     <label style={{ display: "grid", gap: 6 }}>
       <span style={{ fontSize: 12, color: theme.muted }}>{label}</span>
       <select
-        defaultValue={defaultValue}
+        value={defaultValue}
+        onChange={(event) => onChange?.(event.target.value)}
         style={{
           width: "100%",
           height: 38,
