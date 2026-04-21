@@ -15,20 +15,45 @@ import {
   formatTimestamp,
   type CreditBalance,
   type GenerationInput,
-  type GenerationSummary
+  type GenerationSummary,
+  type ProjectSummary
 } from "@haf/shared";
 import { componentRegistry } from "@haf/component-registry";
-import { estimateGenerationTokens } from "@haf/pricing";
 import "./styles.css";
 
 const API_BASE =
   (globalThis as { __HAF_API__?: string }).__HAF_API__ ?? "https://haf-api.YOUR-SUBDOMAIN.workers.dev";
 
+const MATERIAL_OPTIONS = [
+  { label: "PEEK-CF", value: "PEEK-CF" },
+  { label: "AlSi10Mg", value: "AlSi10Mg" },
+  { label: "Ti-6Al-4V", value: "Ti-6Al-4V" },
+  { label: "Inconel 718", value: "Inconel 718" }
+];
+
+const EXPORT_OPTIONS = [
+  { label: "STL", value: "stl" },
+  { label: "STEP", value: "step" },
+  { label: "JSON", value: "json" }
+] as const;
+
 function App() {
   const [credits, setCredits] = React.useState<CreditBalance>({ available: 184, reserved: 0 });
-  const [generation, setGeneration] = React.useState<GenerationSummary | null>(null);
-  const [loading, setLoading] = React.useState(false);
+
+  const [projects, setProjects] = React.useState<ProjectSummary[]>([]);
+  const [activeProjectId, setActiveProjectId] = React.useState<string>("proj_0001");
+
+  const [generations, setGenerations] = React.useState<GenerationSummary[]>([]);
+  const [selectedGenerationId, setSelectedGenerationId] = React.useState<string | null>(null);
+
+  const [loadingWorkspace, setLoadingWorkspace] = React.useState(true);
+  const [submittingGeneration, setSubmittingGeneration] = React.useState(false);
+  const [submittingIteration, setSubmittingIteration] = React.useState(false);
+  const [submittingExport, setSubmittingExport] = React.useState(false);
+
   const [selectedFamily, setSelectedFamily] = React.useState("nosecone");
+  const [exportFormat, setExportFormat] = React.useState<(typeof EXPORT_OPTIONS)[number]["value"]>("stl");
+
   const [form, setForm] = React.useState<GenerationInput>({
     componentFamily: "nosecone",
     componentName: "HAF-NC-01",
@@ -39,67 +64,134 @@ function App() {
     targetMassKg: 8.6
   });
 
+  const activeProject = React.useMemo(
+    () => projects.find((project) => project.id === activeProjectId) ?? null,
+    [projects, activeProjectId]
+  );
+
+  const selectedGeneration = React.useMemo(
+    () => generations.find((generation) => generation.id === selectedGenerationId) ?? null,
+    [generations, selectedGenerationId]
+  );
+
+  const latestGeneration = generations[0] ?? null;
+  const displayGeneration = selectedGeneration ?? latestGeneration;
+
+  const selectedMeta =
+    componentRegistry.find((item) => item.key === selectedFamily) ?? componentRegistry[0];
+
+  const validationMessages = displayGeneration?.result?.validations ?? [];
+
   React.useEffect(() => {
-    void loadInitial();
+    void loadWorkspace();
   }, []);
 
   React.useEffect(() => {
     const registryItem = componentRegistry.find((item) => item.key === selectedFamily);
     if (!registryItem) return;
-    setForm(registryItem.defaultInput);
+
+    setForm((prev) => ({
+      ...registryItem.defaultInput,
+      componentName:
+        prev.componentFamily === registryItem.defaultInput.componentFamily
+          ? prev.componentName
+          : registryItem.defaultInput.componentName
+    }));
   }, [selectedFamily]);
 
   React.useEffect(() => {
-    if (!generation || generation.status === "completed" || generation.status === "failed") return;
+    if (!activeProjectId) return;
+    void loadGenerations(activeProjectId);
+  }, [activeProjectId]);
+
+  React.useEffect(() => {
+    const runningGeneration = generations.find(
+      (generation) => generation.status === "queued" || generation.status === "running"
+    );
+
+    if (!runningGeneration) return;
 
     const timer = window.setInterval(() => {
-      void loadGeneration(generation.id);
       void loadCredits();
-    }, 1200);
+      void loadGenerations(activeProjectId);
+    }, 1500);
 
     return () => window.clearInterval(timer);
-  }, [generation]);
+  }, [generations, activeProjectId]);
 
-  async function loadInitial() {
-    await Promise.all([loadCredits(), loadLatestGeneration()]);
+  async function loadWorkspace() {
+    setLoadingWorkspace(true);
+
+    try {
+      await Promise.all([loadCredits(), loadProjects()]);
+    } finally {
+      setLoadingWorkspace(false);
+    }
   }
 
   async function loadCredits() {
     try {
       const response = await fetch(`${API_BASE}/credits/balance`);
       const data = await response.json();
-      setCredits(data.credits);
+
+      if (data.credits) {
+        setCredits(data.credits);
+      }
     } catch {
-      // keep starter defaults
+      // keep starter values
     }
   }
 
-  async function loadLatestGeneration() {
+  async function loadProjects() {
     try {
-      const response = await fetch(`${API_BASE}/generations`);
+      const response = await fetch(`${API_BASE}/projects`);
       const data = await response.json();
-      if (data.generations?.length) {
-        setGeneration(data.generations[0]);
+
+      if (Array.isArray(data.projects) && data.projects.length > 0) {
+        setProjects(data.projects);
+
+        setActiveProjectId((current) => {
+          const stillExists = data.projects.some((project: ProjectSummary) => project.id === current);
+          return stillExists ? current : data.projects[0].id;
+        });
       }
     } catch {
       // keep starter state
     }
   }
 
-  async function loadGeneration(id: string) {
+  async function loadGenerations(projectId: string) {
     try {
-      const response = await fetch(`${API_BASE}/generations/${id}`);
+      const response = await fetch(`${API_BASE}/generations?projectId=${encodeURIComponent(projectId)}`);
       const data = await response.json();
-      if (data.generation) {
-        setGeneration(data.generation);
+
+      if (Array.isArray(data.generations)) {
+        setGenerations(data.generations);
+
+        setSelectedGenerationId((current) => {
+          if (current && data.generations.some((generation: GenerationSummary) => generation.id === current)) {
+            return current;
+          }
+          return data.generations[0]?.id ?? null;
+        });
       }
     } catch {
-      // ignore for starter
+      // keep current state
     }
   }
 
-  async function handleGenerate() {
-    setLoading(true);
+  function syncFormFromGeneration(generation: GenerationSummary) {
+    setForm(generation.input);
+    setSelectedFamily(generation.input.componentFamily);
+  }
+
+  async function handleGenerateConcept() {
+    if (!activeProjectId) {
+      alert("No active project is loaded.");
+      return;
+    }
+
+    setSubmittingGeneration(true);
 
     try {
       const response = await fetch(`${API_BASE}/generations`, {
@@ -108,7 +200,7 @@ function App() {
           "content-type": "application/json"
         },
         body: JSON.stringify({
-          projectId: "proj_0001",
+          projectId: activeProjectId,
           input: form
         })
       });
@@ -116,22 +208,111 @@ function App() {
       const data = await response.json();
 
       if (!response.ok) {
-        alert(data.error ?? "Generation failed.");
+        alert(typeof data.error === "string" ? data.error : "Generation request failed.");
         return;
       }
 
-      setGeneration(data.generation);
-      await loadCredits();
+      await Promise.all([loadCredits(), loadGenerations(activeProjectId)]);
+      if (data.generation?.id) {
+        setSelectedGenerationId(data.generation.id);
+      }
     } catch {
       alert("Could not reach the API.");
     } finally {
-      setLoading(false);
+      setSubmittingGeneration(false);
     }
   }
 
-  const estimatedCost = estimateGenerationTokens(form.componentFamily);
-  const validationMessages = generation?.result?.validations ?? [];
-  const selectedMeta = componentRegistry.find((item) => item.key === selectedFamily)!;
+  async function handleCreateIteration() {
+    if (!activeProjectId) {
+      alert("No active project is loaded.");
+      return;
+    }
+
+    if (!displayGeneration) {
+      alert("Select a generation before creating an iteration.");
+      return;
+    }
+
+    setSubmittingIteration(true);
+
+    try {
+      const response = await fetch(`${API_BASE}/iterations`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          projectId: activeProjectId,
+          parentGenerationId: displayGeneration.id,
+          input: form
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        alert(typeof data.error === "string" ? data.error : "Iteration request failed.");
+        return;
+      }
+
+      await Promise.all([loadCredits(), loadGenerations(activeProjectId)]);
+      if (data.generation?.id) {
+        setSelectedGenerationId(data.generation.id);
+      }
+    } catch {
+      alert("Could not reach the API.");
+    } finally {
+      setSubmittingIteration(false);
+    }
+  }
+
+  async function handleQueueExport() {
+    if (!displayGeneration) {
+      alert("Select a completed generation before queueing export.");
+      return;
+    }
+
+    if (displayGeneration.status !== "completed") {
+      alert("Exports can only be queued for completed generations.");
+      return;
+    }
+
+    setSubmittingExport(true);
+
+    try {
+      const response = await fetch(`${API_BASE}/exports`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          generationId: displayGeneration.id,
+          format: exportFormat
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        alert(typeof data.error === "string" ? data.error : "Export queue request failed.");
+        return;
+      }
+
+      await loadGenerations(activeProjectId);
+      alert(`Export queued: ${data.export?.filename ?? "artifact"}`);
+    } catch {
+      alert("Could not reach the API.");
+    } finally {
+      setSubmittingExport(false);
+    }
+  }
+
+  function statusTone(status?: string) {
+    if (status === "completed") return "success";
+    if (status === "failed") return "warning";
+    return "neutral";
+  }
 
   return (
     <AppShell>
@@ -143,22 +324,41 @@ function App() {
           </div>
 
           <div className="topbar-meta">
-            <span>Workspace: Fabrication Bay 01</span>
-            <span>Project: Lunar Nosecone Study</span>
+            <span>Workspace: {activeProject?.workspaceLabel ?? "Fabrication Bay 01"}</span>
+            <span>Project: {activeProject?.name ?? "—"}</span>
             <span>Credits: {credits.available}</span>
+            <span>Reserved: {credits.reserved}</span>
           </div>
         </header>
 
         <main className="workspace-grid">
           <WorkspacePanel
             title="Parameters"
-            subtitle="Define printable geometry constraints."
+            subtitle="Define printable geometry constraints for additive manufacturing."
             footer={
-              <BlackButton>
-                <span onClick={handleGenerate}>{loading ? "Submitting..." : "Generate Concept"}</span>
+              <BlackButton onClick={handleGenerateConcept} disabled={submittingGeneration || loadingWorkspace}>
+                {submittingGeneration ? "Submitting..." : "Generate Concept"}
               </BlackButton>
             }
           >
+            <SidebarSection title="Workspace">
+              <SelectField
+                label="Active Project"
+                defaultValue={activeProjectId}
+                options={
+                  projects.length
+                    ? projects.map((project) => ({
+                        label: `${project.name} · ${project.workspaceLabel}`,
+                        value: project.id
+                      }))
+                    : [{ label: "Lunar Nosecone Study · Fabrication Bay 01", value: "proj_0001" }]
+                }
+                onChange={(value) => setActiveProjectId(value)}
+              />
+              <MetricRow label="Project Family" value={activeProject?.componentFamily ?? form.componentFamily} />
+              <MetricRow label="Manufacturing Mode" value="Additive / 3D Printing" />
+            </SidebarSection>
+
             <SidebarSection title="Component">
               <SelectField
                 label="Component Family"
@@ -201,12 +401,7 @@ function App() {
               <SelectField
                 label="Build Material"
                 defaultValue={form.material}
-                options={[
-                  { label: "PEEK-CF", value: "PEEK-CF" },
-                  { label: "AlSi10Mg", value: "AlSi10Mg" },
-                  { label: "Ti-6Al-4V", value: "Ti-6Al-4V" },
-                  { label: "Inconel 718", value: "Inconel 718" }
-                ]}
+                options={MATERIAL_OPTIONS}
                 onChange={(value) => setForm((prev) => ({ ...prev, material: value }))}
               />
               <InputField
@@ -217,43 +412,51 @@ function App() {
               />
             </SidebarSection>
 
-            <SidebarSection title="Profile">
+            <SidebarSection title="Fabrication Profile">
               <MetricRow label="Profile" value={selectedMeta.label} />
-              <MetricRow label="Estimated Burn" value={`${estimatedCost} credits`} />
               <MetricRow label="Mode" value="Concept Geometry" />
+              <MetricRow
+                label="Printable State"
+                value={displayGeneration?.status === "completed" ? "Validated Concept" : "Pending Generation"}
+              />
             </SidebarSection>
           </WorkspacePanel>
 
           <section className="center-column">
             <div className="center-toolbar">
               <span>Fabricator Workspace / Geometry Preview</span>
-              <span>Run Mode: {generation?.status ?? "idle"}</span>
+              <span>Run Mode: {displayGeneration?.status ?? "idle"}</span>
             </div>
 
             <GraphPaperRoom
-              title={form.componentName}
-              geometry={generation?.result?.geometry}
+              title={displayGeneration?.componentName ?? form.componentName}
+              geometry={displayGeneration?.result?.geometry}
             />
 
             <div className="statusbar">
-              <span>Status: {(generation?.status ?? "idle").toUpperCase()}</span>
-              <span>Generation: {generation?.id ?? "—"}</span>
-              <span>Updated: {generation ? formatTimestamp(generation.updatedAt) : "—"}</span>
+              <span>Status: {(displayGeneration?.status ?? "idle").toUpperCase()}</span>
+              <span>Generation: {displayGeneration?.id ?? "—"}</span>
+              <span>Updated: {displayGeneration ? formatTimestamp(displayGeneration.updatedAt) : "—"}</span>
             </div>
           </section>
 
-          <WorkspacePanel title="Results" subtitle="Validation and export status.">
-            <SidebarSection title="Output">
-              <MetricRow label="Revision" value={generation?.result?.revision ?? "—"} />
-              <MetricRow label="Export" value={generation?.result?.exportState ?? "—"} />
-              <MetricRow label="Token Cost" value={generation ? String(generation.tokenCost) : "—"} />
+          <WorkspacePanel title="Results" subtitle="Validation, lineage, and additive export status.">
+            <SidebarSection title="Selected Run">
+              <MetricRow label="Revision" value={displayGeneration?.result?.revision ?? "—"} />
+              <MetricRow label="Status" value={displayGeneration?.status ?? "—"} />
+              <MetricRow label="Export State" value={displayGeneration?.result?.exportState ?? "—"} />
+              <MetricRow label="Token Cost" value={displayGeneration ? String(displayGeneration.tokenCost) : "—"} />
               <MetricRow
                 label="Estimated Mass"
                 value={
-                  generation?.result?.estimatedMassKg !== undefined
-                    ? `${generation.result.estimatedMassKg} kg`
+                  displayGeneration?.result?.estimatedMassKg !== undefined
+                    ? `${displayGeneration.result.estimatedMassKg} kg`
                     : "—"
                 }
+              />
+              <MetricRow
+                label="Parent Run"
+                value={displayGeneration?.parentGenerationId ?? "Root Concept"}
               />
             </SidebarSection>
 
@@ -269,7 +472,63 @@ function App() {
                 <div className="message">
                   <div className="message-title">Awaiting Generation</div>
                   <div className="message-body">
-                    Submit a concept run to generate geometry and validation output.
+                    Submit a concept run to generate printable geometry and validation output.
+                  </div>
+                </div>
+              )}
+            </SidebarSection>
+
+            <SidebarSection title="Export">
+              <SelectField
+                label="Export Format"
+                defaultValue={exportFormat}
+                options={EXPORT_OPTIONS.map((item) => ({ label: item.label, value: item.value }))}
+                onChange={(value) => setExportFormat(value as "stl" | "step" | "json")}
+              />
+              <MetricRow
+                label="Export Readiness"
+                value={displayGeneration?.status === "completed" ? "Ready To Queue" : "Generation Required"}
+              />
+            </SidebarSection>
+
+            <SidebarSection title="Generation History">
+              {generations.length ? (
+                <div className="history-list">
+                  {generations.map((generation) => {
+                    const isActive = generation.id === displayGeneration?.id;
+                    return (
+                      <button
+                        key={generation.id}
+                        type="button"
+                        className={`history-item ${isActive ? "history-item-active" : ""}`}
+                        onClick={() => {
+                          setSelectedGenerationId(generation.id);
+                          syncFormFromGeneration(generation);
+                        }}
+                      >
+                        <div className="history-item-top">
+                          <span className="history-item-name">{generation.componentName}</span>
+                          <span className={`history-chip history-chip-${statusTone(generation.status)}`}>
+                            {generation.status}
+                          </span>
+                        </div>
+                        <div className="history-item-meta">
+                          <span>{generation.id}</span>
+                          <span>{formatTimestamp(generation.updatedAt)}</span>
+                        </div>
+                        <div className="history-item-meta">
+                          <span>{generation.input.componentFamily}</span>
+                          <span>{generation.tokenCost} credits</span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="message">
+                  <div className="message-title">No Runs</div>
+                  <div className="message-body">
+                    This project does not have any generation history yet.
                   </div>
                 </div>
               )}
@@ -277,8 +536,21 @@ function App() {
 
             <SidebarSection title="Actions">
               <div className="actions">
-                <BlackButton subdued>Queue Export</BlackButton>
-                <BlackButton subdued>Create Iteration</BlackButton>
+                <BlackButton
+                  subdued
+                  onClick={handleQueueExport}
+                  disabled={!displayGeneration || displayGeneration.status !== "completed" || submittingExport}
+                >
+                  {submittingExport ? "Queueing Export..." : "Queue Export"}
+                </BlackButton>
+
+                <BlackButton
+                  subdued
+                  onClick={handleCreateIteration}
+                  disabled={!displayGeneration || submittingIteration}
+                >
+                  {submittingIteration ? "Creating Iteration..." : "Create Iteration"}
+                </BlackButton>
               </div>
             </SidebarSection>
           </WorkspacePanel>
