@@ -1,1 +1,26 @@
-
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@haf/shared": ["packages/shared/src"],
+      "@haf/ui": ["packages/ui/src"],
+      "@haf/viewer": ["packages/viewer/src"],
+      "@haf/schemas": ["packages/schemas/src"],
+      "@haf/component-registry": ["packages/component-registry/src"],
+      "@haf/pricing": ["packages/pricing/src"],
+      "@haf/validation": ["packages/validation/src"],
+      "@haf/exports": ["packages/exports/src"]
+    }
+  }
+}
