@@ -1,7 +1,15 @@
 import React, { type CSSProperties } from "react";
-import { theme } from "@haf/shared";
+import { theme, type GeometryPreview } from "@haf/shared";
 
-export function GraphPaperRoom({ title = "GEOMETRY PREVIEW" }: { title?: string }) {
+export function GraphPaperRoom({
+  title = "GEOMETRY PREVIEW",
+  geometry
+}: {
+  title?: string;
+  geometry?: GeometryPreview;
+}) {
+  const silhouette = geometry?.silhouette ?? "nosecone";
+
   return (
     <div style={styles.viewport}>
       <div style={styles.room}>
@@ -10,17 +18,67 @@ export function GraphPaperRoom({ title = "GEOMETRY PREVIEW" }: { title?: string 
         <div style={styles.shadow} />
 
         <div style={styles.part}>
-          <div style={styles.tip} />
-          <div style={styles.body} />
-          <div style={styles.bandTop} />
-          <div style={styles.bandMid} />
-          <div style={styles.nozzleHint} />
+          {silhouette === "nosecone" ? <NoseconeShape /> : null}
+          {silhouette === "shell" ? <ShellShape /> : null}
+          {silhouette === "rover-arm" ? <RoverArmShape /> : null}
+          {silhouette === "grid-fin" ? <GridFinShape /> : null}
         </div>
 
         <div style={styles.overlayTop}>{title}</div>
-        <div style={styles.overlayBottom}>MM · CONCEPT MODE · FABRICATION BAY</div>
+        <div style={styles.overlayBottom}>
+          {geometry
+            ? `${geometry.material} · ${geometry.lengthMm}MM · ${geometry.wallThicknessMm}MM WALL`
+            : "MM · CONCEPT MODE · FABRICATION BAY"}
+        </div>
       </div>
     </div>
+  );
+}
+
+function NoseconeShape() {
+  return (
+    <>
+      <div style={styles.tip} />
+      <div style={styles.body} />
+      <div style={styles.bandTop} />
+      <div style={styles.bandMid} />
+      <div style={styles.nozzleHint} />
+    </>
+  );
+}
+
+function ShellShape() {
+  return (
+    <>
+      <div style={styles.shellOuter} />
+      <div style={styles.shellInner} />
+      <div style={styles.shellBraceLeft} />
+      <div style={styles.shellBraceRight} />
+    </>
+  );
+}
+
+function RoverArmShape() {
+  return (
+    <>
+      <div style={styles.armBase} />
+      <div style={styles.armLink} />
+      <div style={styles.armJointA} />
+      <div style={styles.armJointB} />
+      <div style={styles.armHead} />
+    </>
+  );
+}
+
+function GridFinShape() {
+  return (
+    <>
+      <div style={styles.finFrame} />
+      <div style={styles.finGridA} />
+      <div style={styles.finGridB} />
+      <div style={styles.finGridC} />
+      <div style={styles.finGridD} />
+    </>
   );
 }
 
@@ -74,7 +132,8 @@ const styles: Record<string, CSSProperties> = {
     height: 48,
     transform: "translateX(-50%)",
     borderRadius: "50%",
-    background: "radial-gradient(ellipse at center, rgba(0,0,0,0.22) 0%, rgba(0,0,0,0.06) 54%, rgba(0,0,0,0) 78%)",
+    background:
+      "radial-gradient(ellipse at center, rgba(0,0,0,0.22) 0%, rgba(0,0,0,0.06) 54%, rgba(0,0,0,0) 78%)",
     filter: "blur(2px)"
   },
   part: {
@@ -82,9 +141,10 @@ const styles: Record<string, CSSProperties> = {
     left: "50%",
     top: "48%",
     transform: "translate(-50%, -50%)",
-    width: 160,
+    width: 220,
     height: 360
   },
+
   tip: {
     position: "absolute",
     left: "50%",
@@ -94,8 +154,7 @@ const styles: Record<string, CSSProperties> = {
     height: 0,
     borderLeft: "48px solid transparent",
     borderRight: "48px solid transparent",
-    borderBottom: "90px solid #d4d4d2",
-    filter: "drop-shadow(0 2px 2px rgba(0,0,0,0.16))"
+    borderBottom: "90px solid #d4d4d2"
   },
   body: {
     position: "absolute",
@@ -138,6 +197,140 @@ const styles: Record<string, CSSProperties> = {
     background: "linear-gradient(180deg, #7f7f7e 0%, #616160 100%)",
     clipPath: "polygon(10% 0%, 90% 0%, 100% 100%, 0% 100%)"
   },
+
+  shellOuter: {
+    position: "absolute",
+    left: "50%",
+    top: 70,
+    transform: "translateX(-50%)",
+    width: 160,
+    height: 180,
+    background: "#d3d3d1",
+    border: "1px solid rgba(0,0,0,0.14)"
+  },
+  shellInner: {
+    position: "absolute",
+    left: "50%",
+    top: 96,
+    transform: "translateX(-50%)",
+    width: 110,
+    height: 128,
+    background: "rgba(233,233,231,0.95)",
+    border: "1px solid rgba(0,0,0,0.1)"
+  },
+  shellBraceLeft: {
+    position: "absolute",
+    left: 42,
+    top: 218,
+    width: 60,
+    height: 16,
+    background: "#a9a9a7",
+    transform: "rotate(-28deg)"
+  },
+  shellBraceRight: {
+    position: "absolute",
+    right: 42,
+    top: 218,
+    width: 60,
+    height: 16,
+    background: "#a9a9a7",
+    transform: "rotate(28deg)"
+  },
+
+  armBase: {
+    position: "absolute",
+    left: 36,
+    top: 232,
+    width: 68,
+    height: 42,
+    background: "#acacab",
+    border: "1px solid rgba(0,0,0,0.12)"
+  },
+  armLink: {
+    position: "absolute",
+    left: 88,
+    top: 170,
+    width: 104,
+    height: 18,
+    background: "#c7c7c5",
+    transform: "rotate(-28deg)",
+    transformOrigin: "left center"
+  },
+  armJointA: {
+    position: "absolute",
+    left: 84,
+    top: 190,
+    width: 26,
+    height: 26,
+    borderRadius: "50%",
+    background: "#8f8f8d"
+  },
+  armJointB: {
+    position: "absolute",
+    left: 172,
+    top: 138,
+    width: 28,
+    height: 28,
+    borderRadius: "50%",
+    background: "#8f8f8d"
+  },
+  armHead: {
+    position: "absolute",
+    left: 188,
+    top: 114,
+    width: 24,
+    height: 60,
+    background: "#b8b8b6",
+    border: "1px solid rgba(0,0,0,0.12)"
+  },
+
+  finFrame: {
+    position: "absolute",
+    left: "50%",
+    top: 90,
+    transform: "translateX(-50%)",
+    width: 150,
+    height: 150,
+    border: "10px solid #b7b7b5",
+    background: "rgba(255,255,255,0.2)"
+  },
+  finGridA: {
+    position: "absolute",
+    left: "50%",
+    top: 90,
+    transform: "translateX(-50%)",
+    width: 150,
+    height: 10,
+    background: "#9a9a98"
+  },
+  finGridB: {
+    position: "absolute",
+    left: "50%",
+    top: 140,
+    transform: "translateX(-50%)",
+    width: 150,
+    height: 10,
+    background: "#9a9a98"
+  },
+  finGridC: {
+    position: "absolute",
+    left: "50%",
+    top: 190,
+    transform: "translateX(-50%)",
+    width: 150,
+    height: 10,
+    background: "#9a9a98"
+  },
+  finGridD: {
+    position: "absolute",
+    left: "50%",
+    top: 90,
+    transform: "translateX(-50%)",
+    width: 10,
+    height: 150,
+    background: "#9a9a98"
+  },
+
   overlayTop: {
     position: "absolute",
     top: 12,
