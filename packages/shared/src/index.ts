@@ -12,14 +12,15 @@ export const theme = {
   gridFine: "rgba(0,0,0,0.04)"
 };
 
+export type ComponentFamily = "nosecone" | "shell" | "rover-arm" | "grid-fin";
+export type GenerationStatus = "queued" | "running" | "completed" | "failed";
+export type ExportStatus = "idle" | "queued" | "processing" | "ready" | "failed";
+export type ValidationSeverity = "success" | "warning" | "error";
+
 export type CreditBalance = {
   available: number;
   reserved: number;
 };
-
-export type GenerationStatus = "queued" | "running" | "completed" | "failed";
-
-export type ValidationSeverity = "success" | "warning" | "error";
 
 export type ValidationMessage = {
   severity: ValidationSeverity;
@@ -28,15 +29,16 @@ export type ValidationMessage = {
 };
 
 export type GeometryPreview = {
-  silhouette: "nosecone" | "shell" | "rover-arm" | "grid-fin";
+  silhouette: ComponentFamily;
   lengthMm: number;
   widthMm: number;
   wallThicknessMm: number;
   material: string;
+  notes?: string[];
 };
 
 export type GenerationInput = {
-  componentFamily: string;
+  componentFamily: ComponentFamily;
   componentName: string;
   lengthMm: number;
   baseDiameterMm: number;
@@ -47,28 +49,42 @@ export type GenerationInput = {
 
 export type GenerationResult = {
   revision: string;
-  exportState: "preview-ready" | "queued" | "generated";
+  exportState: ExportStatus;
   estimatedMassKg: number;
   estimatedBurn: number;
   geometry: GeometryPreview;
   validations: ValidationMessage[];
 };
 
+export type ProjectSummary = {
+  id: string;
+  name: string;
+  componentFamily: ComponentFamily;
+  workspaceLabel: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type GenerationSummary = {
   id: string;
   projectId: string;
+  parentGenerationId?: string | null;
   componentName: string;
   status: GenerationStatus;
   tokenCost: number;
   updatedAt: string;
+  createdAt: string;
   input: GenerationInput;
   result?: GenerationResult;
 };
 
-export type ProjectSummary = {
+export type ExportRecord = {
   id: string;
-  name: string;
-  partFamily: string;
+  generationId: string;
+  status: ExportStatus;
+  format: "stl" | "step" | "json";
+  filename: string;
+  createdAt: string;
   updatedAt: string;
 };
 
