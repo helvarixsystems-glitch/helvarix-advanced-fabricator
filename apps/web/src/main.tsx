@@ -10,31 +10,128 @@ import {
   WorkspacePanel
 } from "@haf/ui";
 import { GraphPaperRoom } from "@haf/viewer";
-import { appName, formatTimestamp, type CreditBalance, type GenerationSummary } from "@haf/shared";
+import {
+  appName,
+  formatTimestamp,
+  type CreditBalance,
+  type GenerationInput,
+  type GenerationSummary
+} from "@haf/shared";
 import { componentRegistry } from "@haf/component-registry";
 import { estimateGenerationTokens } from "@haf/pricing";
-import { getMockValidationMessages } from "@haf/validation";
 import "./styles.css";
 
-const credits: CreditBalance = {
-  available: 184,
-  reserved: 12
-};
-
-const latestGeneration: GenerationSummary = {
-  id: "gen_0001",
-  projectId: "proj_0001",
-  componentName: "HAF-NC-01",
-  status: "completed",
-  tokenCost: 12,
-  updatedAt: new Date().toISOString()
-};
+const API_BASE =
+  (globalThis as { __HAF_API__?: string }).__HAF_API__ ?? "https://haf-api.YOUR-SUBDOMAIN.workers.dev";
 
 function App() {
-  const selectedFamily = "nosecone";
+  const [credits, setCredits] = React.useState<CreditBalance>({ available: 184, reserved: 0 });
+  const [generation, setGeneration] = React.useState<GenerationSummary | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [selectedFamily, setSelectedFamily] = React.useState("nosecone");
+  const [form, setForm] = React.useState<GenerationInput>({
+    componentFamily: "nosecone",
+    componentName: "HAF-NC-01",
+    lengthMm: 1200,
+    baseDiameterMm: 320,
+    wallThicknessMm: 3.4,
+    material: "PEEK-CF",
+    targetMassKg: 8.6
+  });
+
+  React.useEffect(() => {
+    void loadInitial();
+  }, []);
+
+  React.useEffect(() => {
+    const registryItem = componentRegistry.find((item) => item.key === selectedFamily);
+    if (!registryItem) return;
+    setForm(registryItem.defaultInput);
+  }, [selectedFamily]);
+
+  React.useEffect(() => {
+    if (!generation || generation.status === "completed" || generation.status === "failed") return;
+
+    const timer = window.setInterval(() => {
+      void loadGeneration(generation.id);
+      void loadCredits();
+    }, 1200);
+
+    return () => window.clearInterval(timer);
+  }, [generation]);
+
+  async function loadInitial() {
+    await Promise.all([loadCredits(), loadLatestGeneration()]);
+  }
+
+  async function loadCredits() {
+    try {
+      const response = await fetch(`${API_BASE}/credits/balance`);
+      const data = await response.json();
+      setCredits(data.credits);
+    } catch {
+      // keep starter defaults
+    }
+  }
+
+  async function loadLatestGeneration() {
+    try {
+      const response = await fetch(`${API_BASE}/generations`);
+      const data = await response.json();
+      if (data.generations?.length) {
+        setGeneration(data.generations[0]);
+      }
+    } catch {
+      // keep starter state
+    }
+  }
+
+  async function loadGeneration(id: string) {
+    try {
+      const response = await fetch(`${API_BASE}/generations/${id}`);
+      const data = await response.json();
+      if (data.generation) {
+        setGeneration(data.generation);
+      }
+    } catch {
+      // ignore for starter
+    }
+  }
+
+  async function handleGenerate() {
+    setLoading(true);
+
+    try {
+      const response = await fetch(`${API_BASE}/generations`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          projectId: "proj_0001",
+          input: form
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        alert(data.error ?? "Generation failed.");
+        return;
+      }
+
+      setGeneration(data.generation);
+      await loadCredits();
+    } catch {
+      alert("Could not reach the API.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const estimatedCost = estimateGenerationTokens(form.componentFamily);
+  const validationMessages = generation?.result?.validations ?? [];
   const selectedMeta = componentRegistry.find((item) => item.key === selectedFamily)!;
-  const estimatedCost = estimateGenerationTokens(selectedFamily);
-  const validationMessages = getMockValidationMessages();
 
   return (
     <AppShell>
@@ -56,7 +153,11 @@ function App() {
           <WorkspacePanel
             title="Parameters"
             subtitle="Define printable geometry constraints."
-            footer={<BlackButton>Generate Concept</BlackButton>}
+            footer={
+              <BlackButton>
+                <span onClick={handleGenerate}>{loading ? "Submitting..." : "Generate Concept"}</span>
+              </BlackButton>
+            }
           >
             <SidebarSection title="Component">
               <SelectField
@@ -66,27 +167,54 @@ function App() {
                   label: item.label,
                   value: item.key
                 }))}
+                onChange={(value) => setSelectedFamily(value)}
               />
-              <InputField label="Component Name" defaultValue="HAF-NC-01" />
+              <InputField
+                label="Component Name"
+                value={form.componentName}
+                onChange={(value) => setForm((prev) => ({ ...prev, componentName: value }))}
+              />
             </SidebarSection>
 
             <SidebarSection title="Dimensions">
-              <InputField label="Length (mm)" type="number" defaultValue="1200" />
-              <InputField label="Base Diameter (mm)" type="number" defaultValue="320" />
-              <InputField label="Wall Thickness (mm)" type="number" defaultValue="3.4" />
+              <InputField
+                label="Length (mm)"
+                type="number"
+                value={form.lengthMm}
+                onChange={(value) => setForm((prev) => ({ ...prev, lengthMm: Number(value) }))}
+              />
+              <InputField
+                label="Base Diameter (mm)"
+                type="number"
+                value={form.baseDiameterMm}
+                onChange={(value) => setForm((prev) => ({ ...prev, baseDiameterMm: Number(value) }))}
+              />
+              <InputField
+                label="Wall Thickness (mm)"
+                type="number"
+                value={form.wallThicknessMm}
+                onChange={(value) => setForm((prev) => ({ ...prev, wallThicknessMm: Number(value) }))}
+              />
             </SidebarSection>
 
             <SidebarSection title="Material">
               <SelectField
                 label="Build Material"
-                defaultValue="AlSi10Mg"
+                defaultValue={form.material}
                 options={[
+                  { label: "PEEK-CF", value: "PEEK-CF" },
                   { label: "AlSi10Mg", value: "AlSi10Mg" },
                   { label: "Ti-6Al-4V", value: "Ti-6Al-4V" },
-                  { label: "PEEK-CF", value: "PEEK-CF" }
+                  { label: "Inconel 718", value: "Inconel 718" }
                 ]}
+                onChange={(value) => setForm((prev) => ({ ...prev, material: value }))}
               />
-              <InputField label="Target Mass (kg)" type="number" defaultValue="8.6" />
+              <InputField
+                label="Target Mass (kg)"
+                type="number"
+                value={form.targetMassKg}
+                onChange={(value) => setForm((prev) => ({ ...prev, targetMassKg: Number(value) }))}
+              />
             </SidebarSection>
 
             <SidebarSection title="Profile">
@@ -99,37 +227,57 @@ function App() {
           <section className="center-column">
             <div className="center-toolbar">
               <span>Fabricator Workspace / Geometry Preview</span>
-              <span>Run Mode: Concept</span>
+              <span>Run Mode: {generation?.status ?? "idle"}</span>
             </div>
 
-            <GraphPaperRoom title="HAF-NC-01" />
+            <GraphPaperRoom
+              title={form.componentName}
+              geometry={generation?.result?.geometry}
+            />
 
             <div className="statusbar">
-              <span>Status: {latestGeneration.status.toUpperCase()}</span>
-              <span>Generation: {latestGeneration.id}</span>
-              <span>Updated: {formatTimestamp(latestGeneration.updatedAt)}</span>
+              <span>Status: {(generation?.status ?? "idle").toUpperCase()}</span>
+              <span>Generation: {generation?.id ?? "—"}</span>
+              <span>Updated: {generation ? formatTimestamp(generation.updatedAt) : "—"}</span>
             </div>
           </section>
 
           <WorkspacePanel title="Results" subtitle="Validation and export status.">
             <SidebarSection title="Output">
-              <MetricRow label="Revision" value="v0.1" />
-              <MetricRow label="Export" value="Preview Ready" />
-              <MetricRow label="Token Cost" value={String(latestGeneration.tokenCost)} />
+              <MetricRow label="Revision" value={generation?.result?.revision ?? "—"} />
+              <MetricRow label="Export" value={generation?.result?.exportState ?? "—"} />
+              <MetricRow label="Token Cost" value={generation ? String(generation.tokenCost) : "—"} />
+              <MetricRow
+                label="Estimated Mass"
+                value={
+                  generation?.result?.estimatedMassKg !== undefined
+                    ? `${generation.result.estimatedMassKg} kg`
+                    : "—"
+                }
+              />
             </SidebarSection>
 
             <SidebarSection title="Validation">
-              {validationMessages.map((message, index) => (
-                <div key={index} className={`message message-${message.severity}`}>
-                  <div className="message-title">{message.title}</div>
-                  <div className="message-body">{message.text}</div>
+              {validationMessages.length ? (
+                validationMessages.map((message, index) => (
+                  <div key={index} className={`message message-${message.severity}`}>
+                    <div className="message-title">{message.title}</div>
+                    <div className="message-body">{message.text}</div>
+                  </div>
+                ))
+              ) : (
+                <div className="message">
+                  <div className="message-title">Awaiting Generation</div>
+                  <div className="message-body">
+                    Submit a concept run to generate geometry and validation output.
+                  </div>
                 </div>
-              ))}
+              )}
             </SidebarSection>
 
             <SidebarSection title="Actions">
               <div className="actions">
-                <BlackButton>Queue Export</BlackButton>
+                <BlackButton subdued>Queue Export</BlackButton>
                 <BlackButton subdued>Create Iteration</BlackButton>
               </div>
             </SidebarSection>
