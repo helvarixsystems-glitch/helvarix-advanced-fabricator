@@ -1,1 +1,13 @@
-
+{
+  "name": "@haf/pricing",
+  "private": true,
+  "version": "0.0.1",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@haf/component-registry": "workspace:*"
+  }
+}
