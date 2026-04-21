@@ -19,6 +19,41 @@ export type CreditBalance = {
 
 export type GenerationStatus = "queued" | "running" | "completed" | "failed";
 
+export type ValidationSeverity = "success" | "warning" | "error";
+
+export type ValidationMessage = {
+  severity: ValidationSeverity;
+  title: string;
+  text: string;
+};
+
+export type GeometryPreview = {
+  silhouette: "nosecone" | "shell" | "rover-arm" | "grid-fin";
+  lengthMm: number;
+  widthMm: number;
+  wallThicknessMm: number;
+  material: string;
+};
+
+export type GenerationInput = {
+  componentFamily: string;
+  componentName: string;
+  lengthMm: number;
+  baseDiameterMm: number;
+  wallThicknessMm: number;
+  material: string;
+  targetMassKg: number;
+};
+
+export type GenerationResult = {
+  revision: string;
+  exportState: "preview-ready" | "queued" | "generated";
+  estimatedMassKg: number;
+  estimatedBurn: number;
+  geometry: GeometryPreview;
+  validations: ValidationMessage[];
+};
+
 export type GenerationSummary = {
   id: string;
   projectId: string;
@@ -26,6 +61,8 @@ export type GenerationSummary = {
   status: GenerationStatus;
   tokenCost: number;
   updatedAt: string;
+  input: GenerationInput;
+  result?: GenerationResult;
 };
 
 export type ProjectSummary = {
