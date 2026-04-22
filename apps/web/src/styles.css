@@ -371,4 +371,48 @@ label {
     flex-direction: column;
     align-items: flex-start;
   }
+  .viewer-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.viewer-mode-button {
+  min-width: 120px;
+  height: 38px;
+  padding: 0 14px;
+  border: 1px solid var(--haf-border);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--haf-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.viewer-mode-button:hover {
+  background: rgba(255, 255, 255, 0.88);
+  border-color: var(--haf-border-strong);
+  color: var(--haf-text);
+}
+
+.viewer-mode-button-active {
+  background: var(--haf-black);
+  border-color: var(--haf-black);
+  color: var(--haf-white);
+}
+
+@media (max-width: 920px) {
+  .viewer-mode-row {
+    width: 100%;
+  }
+
+  .viewer-mode-button {
+    flex: 1 1 100%;
+  }
+}
 }
