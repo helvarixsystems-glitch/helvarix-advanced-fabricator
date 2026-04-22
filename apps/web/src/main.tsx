@@ -9,7 +9,7 @@ import {
   SidebarSection,
   WorkspacePanel
 } from "@haf/ui";
-import { GraphPaperRoom } from "@haf/viewer";
+import { GraphPaperRoom, type ViewerMode } from "@haf/viewer";
 import {
   appName,
   formatTimestamp,
@@ -37,6 +37,12 @@ const EXPORT_OPTIONS = [
   { label: "JSON", value: "json" }
 ] as const;
 
+const VIEW_MODE_OPTIONS: Array<{ label: string; value: ViewerMode }> = [
+  { label: "Concept", value: "concept" },
+  { label: "Mesh", value: "mesh" },
+  { label: "Simulation", value: "simulation" }
+];
+
 function App() {
   const [credits, setCredits] = React.useState<CreditBalance>({ available: 184, reserved: 0 });
 
@@ -53,6 +59,7 @@ function App() {
 
   const [selectedFamily, setSelectedFamily] = React.useState("nosecone");
   const [exportFormat, setExportFormat] = React.useState<(typeof EXPORT_OPTIONS)[number]["value"]>("stl");
+  const [viewerMode, setViewerMode] = React.useState<ViewerMode>("concept");
 
   const [form, setForm] = React.useState<GenerationInput>({
     componentFamily: "nosecone",
@@ -428,9 +435,24 @@ function App() {
               <span>Run Mode: {displayGeneration?.status ?? "idle"}</span>
             </div>
 
+            <div className="viewer-mode-row">
+              {VIEW_MODE_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`viewer-mode-button ${viewerMode === option.value ? "viewer-mode-button-active" : ""}`}
+                  onClick={() => setViewerMode(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+
             <GraphPaperRoom
               title={displayGeneration?.componentName ?? form.componentName}
               geometry={displayGeneration?.result?.geometry}
+              mode={viewerMode}
+              status={displayGeneration?.status ?? "idle"}
             />
 
             <div className="statusbar">
@@ -454,10 +476,7 @@ function App() {
                     : "—"
                 }
               />
-              <MetricRow
-                label="Parent Run"
-                value={displayGeneration?.parentGenerationId ?? "Root Concept"}
-              />
+              <MetricRow label="Parent Run" value={displayGeneration?.parentGenerationId ?? "Root Concept"} />
             </SidebarSection>
 
             <SidebarSection title="Validation">
