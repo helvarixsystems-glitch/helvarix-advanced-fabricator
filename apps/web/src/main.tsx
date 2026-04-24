@@ -55,6 +55,11 @@ const RIGHT_PANEL_TABS: Array<{ label: string; value: RightPanelTab }> = [
   { label: "History", value: "history" }
 ];
 
+const PRIMARY_BUTTON_STYLE: React.CSSProperties = {
+  color: "#ffffff",
+  fontWeight: 700
+};
+
 function App() {
   const simulationPanelRef = React.useRef<SimulationPanelHandle | null>(null);
 
@@ -367,7 +372,7 @@ function App() {
   function getRightPanelFooter() {
     if (rightPanelTab === "simulation") {
       return (
-        <BlackButton subdued onClick={handleRunSimulationFromFooter}>
+        <BlackButton subdued style={PRIMARY_BUTTON_STYLE} onClick={handleRunSimulationFromFooter}>
           Run Simulation
         </BlackButton>
       );
@@ -377,6 +382,7 @@ function App() {
       return (
         <BlackButton
           subdued
+          style={PRIMARY_BUTTON_STYLE}
           onClick={handleExportPackage}
           disabled={!displayGeneration || displayGeneration.status !== "completed" || submittingExport}
         >
@@ -445,6 +451,7 @@ function App() {
             subtitle="Tell the system what the object must do. The engine derives geometry."
             footer={
               <BlackButton
+                style={PRIMARY_BUTTON_STYLE}
                 onClick={handleGenerateConcept}
                 disabled={submittingGeneration || loadingWorkspace}
               >
@@ -1028,23 +1035,15 @@ function App() {
                     <MetricRow label="Status" value={displayGeneration?.status ?? "—"} />
                     <MetricRow
                       label="Candidates"
-                      value={
-                        displayGeneration?.result
-                          ? `${displayGeneration.result.candidatesAccepted}/${displayGeneration.result.candidatesEvaluated} accepted`
-                          : "—"
-                      }
+                      value={formatCandidateAcceptance(displayGeneration?.result)}
                     />
                     <MetricRow
                       label="Material"
-                      value={displayGeneration?.result?.derived?.material ?? "—"}
+                      value={getResultMaterial(displayGeneration?.result)}
                     />
                     <MetricRow
                       label="Estimated Mass"
-                      value={
-                        displayGeneration?.result?.estimatedMassKg !== undefined
-                          ? `${displayGeneration.result.estimatedMassKg} kg`
-                          : "—"
-                      }
+                      value={formatEstimatedMass(displayGeneration?.result)}
                     />
                     <MetricRow
                       label="Token Cost"
@@ -1055,35 +1054,19 @@ function App() {
                   <SidebarSection title="Derived Geometry">
                     <MetricRow
                       label="Length"
-                      value={
-                        displayGeneration?.result?.derived
-                          ? `${displayGeneration.result.derived.lengthMm} mm`
-                          : "—"
-                      }
+                      value={formatDerivedDimension(displayGeneration?.result, "lengthMm")}
                     />
                     <MetricRow
                       label="Width"
-                      value={
-                        displayGeneration?.result?.derived
-                          ? `${displayGeneration.result.derived.widthMm} mm`
-                          : "—"
-                      }
+                      value={formatDerivedDimension(displayGeneration?.result, "widthMm")}
                     />
                     <MetricRow
                       label="Height"
-                      value={
-                        displayGeneration?.result?.derived
-                          ? `${displayGeneration.result.derived.heightMm} mm`
-                          : "—"
-                      }
+                      value={formatDerivedDimension(displayGeneration?.result, "heightMm")}
                     />
                     <MetricRow
                       label="Wall"
-                      value={
-                        displayGeneration?.result?.derived
-                          ? `${displayGeneration.result.derived.wallThicknessMm} mm`
-                          : "—"
-                      }
+                      value={formatDerivedDimension(displayGeneration?.result, "wallThicknessMm")}
                     />
                   </SidebarSection>
 
@@ -1166,6 +1149,7 @@ function App() {
                   <SidebarSection title="Iteration">
                     <BlackButton
                       subdued
+                      style={PRIMARY_BUTTON_STYLE}
                       onClick={handleCreateIteration}
                       disabled={!displayGeneration || submittingIteration}
                     >
@@ -1236,6 +1220,60 @@ function App() {
 
 function getInputComponentName(input: GenerationInput) {
   return input.requirements.componentName;
+}
+
+function formatCandidateAcceptance(result: GenerationSummary["result"]) {
+  if (!result) return "—";
+
+  const accepted =
+    result.candidatesAccepted ??
+    result.geometry?.candidates?.accepted ??
+    (result.selectedCandidate ? 1 : 0);
+
+  const evaluated =
+    result.candidatesEvaluated ??
+    result.geometry?.candidates?.evaluated ??
+    Math.max(accepted, result.selectedCandidate ? 1 : 0);
+
+  return `${accepted}/${evaluated} accepted`;
+}
+
+function getResultMaterial(result: GenerationSummary["result"]) {
+  return (
+    result?.derived?.material ??
+    result?.geometry?.material ??
+    result?.selectedCandidate?.material ??
+    "—"
+  );
+}
+
+function formatEstimatedMass(result: GenerationSummary["result"]) {
+  const value =
+    result?.estimatedMassKg ??
+    result?.derived?.estimatedMassKg ??
+    result?.selectedCandidate?.estimatedMassKg;
+
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+
+  return `${value.toFixed(2)} kg`;
+}
+
+type DerivedDimensionKey = "lengthMm" | "widthMm" | "heightMm" | "wallThicknessMm";
+
+function formatDerivedDimension(result: GenerationSummary["result"], key: DerivedDimensionKey) {
+  const value =
+    result?.derived?.[key] ??
+    result?.geometry?.derived?.[key] ??
+    result?.geometry?.[key] ??
+    result?.selectedCandidate?.[key];
+
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+
+  return `${formatMetricNumber(value)} mm`;
+}
+
+function formatMetricNumber(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
 function safeFileName(value: string) {
