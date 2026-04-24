@@ -1,7 +1,30 @@
 import React, { type CSSProperties } from "react";
-import { theme, type ComponentFamily, type GeometryPreview } from "@haf/shared";
+import { theme, type GeometryPreview } from "@haf/shared";
 
 export type ViewerMode = "concept" | "mesh" | "simulation";
+
+type VisualFamily =
+  | "structural-bracket"
+  | "bell-nozzle"
+  | "pressure-vessel"
+  | "rover-arm"
+  | "grid-fin"
+  | "nosecone"
+  | "shell";
+
+type SafeGeometry = GeometryPreview & {
+  family?: string;
+  silhouette?: string;
+  material?: string;
+  widthMm?: number;
+  heightMm?: number;
+  depthMm?: number;
+  lengthMm?: number;
+  wallThicknessMm?: number;
+  notes?: string[];
+  dimensions?: Record<string, number>;
+  derivedParameters?: Record<string, unknown>;
+};
 
 export function GraphPaperRoom({
   title = "GEOMETRY PREVIEW",
@@ -14,8 +37,8 @@ export function GraphPaperRoom({
   mode?: ViewerMode;
   status?: string;
 }) {
-  const silhouette = geometry?.silhouette;
-  const family = silhouette as ComponentFamily | undefined;
+  const safeGeometry = geometry as SafeGeometry | undefined;
+  const family = normalizeFamily(safeGeometry);
   const hasGeneratedGeometry = Boolean(family);
   const simulationLabel = family ? getSimulationLabel(family) : "SIMULATION VIEW";
 
@@ -35,8 +58,7 @@ export function GraphPaperRoom({
         {hasGeneratedGeometry && family ? (
           <>
             <div style={styles.shadow} />
-
-            <div style={getPartWrapperStyle(mode)}>
+            <div style={getPartWrapperStyle(mode, family)}>
               <PartShape family={family} mode={mode} />
             </div>
           </>
@@ -45,13 +67,15 @@ export function GraphPaperRoom({
         <div style={styles.overlayTop}>{title}</div>
 
         <div style={styles.modeBadge}>
-          {mode === "concept" ? "PART REVIEW" : mode === "mesh" ? "MESH VIEW" : simulationLabel}
+          {mode === "concept"
+            ? "PART REVIEW"
+            : mode === "mesh"
+              ? "MESH VIEW"
+              : simulationLabel}
         </div>
 
         <div style={styles.overlayBottom}>
-          {geometry
-            ? `${geometry.material} · ${geometry.lengthMm}MM · ${geometry.wallThicknessMm}MM WALL`
-            : "GENERATE CONCEPT · NO GEOMETRY LOADED"}
+          {safeGeometry ? formatGeometryLabel(safeGeometry) : "GENERATE CONCEPT · NO GEOMETRY LOADED"}
         </div>
 
         {mode === "simulation" ? (
@@ -62,9 +86,9 @@ export function GraphPaperRoom({
           </div>
         ) : null}
 
-        {geometry?.notes?.length ? (
+        {safeGeometry?.notes?.length ? (
           <div style={styles.notesPanel}>
-            {geometry.notes.slice(0, 3).map((note, index) => (
+            {safeGeometry.notes.slice(0, 3).map((note, index) => (
               <div key={index} style={styles.noteLine}>
                 {note}
               </div>
@@ -74,6 +98,47 @@ export function GraphPaperRoom({
       </div>
     </div>
   );
+}
+
+function normalizeFamily(geometry?: SafeGeometry): VisualFamily | undefined {
+  const rawFamily = geometry?.family ?? geometry?.silhouette;
+
+  if (!rawFamily) return undefined;
+
+  if (rawFamily === "structural-bracket") return "structural-bracket";
+  if (rawFamily === "bell-nozzle") return "bell-nozzle";
+  if (rawFamily === "pressure-vessel") return "pressure-vessel";
+  if (rawFamily === "rover-arm") return "rover-arm";
+  if (rawFamily === "grid-fin") return "grid-fin";
+
+  if (rawFamily === "nosecone") return "nosecone";
+  if (rawFamily === "shell") return "shell";
+
+  return undefined;
+}
+
+function formatGeometryLabel(geometry: SafeGeometry) {
+  const material = geometry.material ?? "MATERIAL TBD";
+
+  const primaryLength =
+    geometry.lengthMm ??
+    geometry.heightMm ??
+    geometry.widthMm ??
+    geometry.dimensions?.lengthMm ??
+    geometry.dimensions?.heightMm ??
+    geometry.dimensions?.widthMm;
+
+  const wallThickness =
+    geometry.wallThicknessMm ??
+    geometry.dimensions?.wallThicknessMm ??
+    geometry.dimensions?.thicknessMm;
+
+  return `${material} · ${formatNumber(primaryLength)}MM · ${formatNumber(wallThickness)}MM WALL`;
+}
+
+function formatNumber(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
 function HudRow({ label, value }: { label: string; value: string }) {
@@ -89,13 +154,87 @@ function PartShape({
   family,
   mode
 }: {
-  family: ComponentFamily;
+  family: VisualFamily;
   mode: ViewerMode;
 }) {
+  if (family === "bell-nozzle") return <BellNozzleShape mode={mode} />;
+  if (family === "structural-bracket") return <StructuralBracketShape mode={mode} />;
+  if (family === "pressure-vessel") return <PressureVesselShape mode={mode} />;
+  if (family === "rover-arm") return <RoverArmShape mode={mode} />;
+  if (family === "grid-fin") return <GridFinShape mode={mode} />;
+
   if (family === "nosecone") return <NoseconeShape mode={mode} />;
   if (family === "shell") return <ShellShape mode={mode} />;
-  if (family === "rover-arm") return <RoverArmShape mode={mode} />;
-  return <GridFinShape mode={mode} />;
+
+  return <StructuralBracketShape mode={mode} />;
+}
+
+function StructuralBracketShape({ mode }: { mode: ViewerMode }) {
+  return (
+    <>
+      <div style={shapeStyles.bracketBackplate(mode)} />
+      <div style={shapeStyles.bracketTopFlange(mode)} />
+      <div style={shapeStyles.bracketBottomFlange(mode)} />
+      <div style={shapeStyles.bracketWebLeft(mode)} />
+      <div style={shapeStyles.bracketWebRight(mode)} />
+      <div style={shapeStyles.bracketBoltA(mode)} />
+      <div style={shapeStyles.bracketBoltB(mode)} />
+      <div style={shapeStyles.bracketBoltC(mode)} />
+      <div style={shapeStyles.bracketBoltD(mode)} />
+
+      {mode === "mesh" ? (
+        <>
+          <div style={shapeStyles.horizontalMesh(82)} />
+          <div style={shapeStyles.horizontalMesh(132)} />
+          <div style={shapeStyles.horizontalMesh(182)} />
+          <div style={shapeStyles.verticalMesh(72)} />
+          <div style={shapeStyles.verticalMesh(116)} />
+          <div style={shapeStyles.verticalMesh(160)} />
+        </>
+      ) : null}
+    </>
+  );
+}
+
+function BellNozzleShape({ mode }: { mode: ViewerMode }) {
+  return (
+    <>
+      <div style={shapeStyles.nozzleChamber(mode)} />
+      <div style={shapeStyles.nozzleThroat(mode)} />
+      <div style={shapeStyles.nozzleBell(mode)} />
+      <div style={shapeStyles.nozzleExitRing(mode)} />
+
+      {mode === "mesh" ? (
+        <>
+          <div style={shapeStyles.meshLine("50%", 58, 82)} />
+          <div style={shapeStyles.meshLine("50%", 112, 58)} />
+          <div style={shapeStyles.meshLine("50%", 172, 96)} />
+          <div style={shapeStyles.meshLine("50%", 238, 142)} />
+          <div style={shapeStyles.nozzleMeshA} />
+          <div style={shapeStyles.nozzleMeshB} />
+        </>
+      ) : null}
+    </>
+  );
+}
+
+function PressureVesselShape({ mode }: { mode: ViewerMode }) {
+  return (
+    <>
+      <div style={shapeStyles.vesselTop(mode)} />
+      <div style={shapeStyles.vesselBody(mode)} />
+      <div style={shapeStyles.vesselBottom(mode)} />
+      <div style={shapeStyles.vesselBandA(mode)} />
+      <div style={shapeStyles.vesselBandB(mode)} />
+      {mode === "mesh" ? (
+        <>
+          <div style={shapeStyles.meshLine("50%", 96, 116)} />
+          <div style={shapeStyles.meshLine("50%", 146, 128)} />
+          <div style={shapeStyles.meshLine("50%", 196, 116)} />
+        </>
+      ) : null}
+    </>
+  );
 }
 
 function NoseconeShape({ mode }: { mode: ViewerMode }) {
@@ -105,7 +244,7 @@ function NoseconeShape({ mode }: { mode: ViewerMode }) {
       <div style={shapeStyles.body(mode)} />
       <div style={shapeStyles.bandTop(mode)} />
       <div style={shapeStyles.bandMid(mode)} />
-      <div style={shapeStyles.nozzleHint(mode)} />
+      <div style={shapeStyles.legacyNozzleHint(mode)} />
       {mode === "mesh" ? (
         <>
           <div style={shapeStyles.meshLine("50%", 22, 96)} />
@@ -194,10 +333,10 @@ function SimulationBackdrop({
   family,
   status
 }: {
-  family: ComponentFamily;
+  family: VisualFamily;
   status?: string;
 }) {
-  if (family === "nosecone" || family === "grid-fin") {
+  if (family === "bell-nozzle" || family === "nosecone" || family === "grid-fin") {
     return (
       <>
         <div style={styles.windTunnelGlow} />
@@ -211,7 +350,7 @@ function SimulationBackdrop({
     );
   }
 
-  if (family === "rover-arm") {
+  if (family === "rover-arm" || family === "structural-bracket") {
     return (
       <>
         <div style={styles.loadField} />
@@ -235,21 +374,36 @@ function SimulationBackdrop({
   );
 }
 
-function getSimulationLabel(family: ComponentFamily) {
-  if (family === "nosecone" || family === "grid-fin") return "WIND TUNNEL";
-  if (family === "rover-arm") return "LOAD TEST";
+function getSimulationLabel(family: VisualFamily) {
+  if (family === "bell-nozzle" || family === "nosecone" || family === "grid-fin") {
+    return "FLOW REVIEW";
+  }
+
+  if (family === "rover-arm" || family === "structural-bracket") {
+    return "LOAD TEST";
+  }
+
   return "PRINT STAND";
 }
 
-function getPartWrapperStyle(mode: ViewerMode): CSSProperties {
+function getPartWrapperStyle(mode: ViewerMode, family: VisualFamily): CSSProperties {
+  const baseScale =
+    family === "bell-nozzle"
+      ? 1.05
+      : family === "structural-bracket"
+        ? 1.04
+        : 1;
+
+  const modeScale =
+    mode === "simulation"
+      ? baseScale + 0.02
+      : mode === "mesh"
+        ? baseScale + 0.01
+        : baseScale;
+
   return {
     ...styles.part,
-    transform:
-      mode === "simulation"
-        ? "translate(-50%, -50%) scale(1.02)"
-        : mode === "mesh"
-          ? "translate(-50%, -50%) scale(1.01)"
-          : "translate(-50%, -50%)"
+    transform: `translate(-50%, -50%) scale(${modeScale})`
   };
 }
 
@@ -579,6 +733,162 @@ const styles: Record<string, CSSProperties | ((status?: string) => CSSProperties
 };
 
 const shapeStyles = {
+  bracketBackplate: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    left: "50%",
+    top: 52,
+    transform: "translateX(-50%)",
+    width: 156,
+    height: 196,
+    borderRadius: 10,
+    background: mode === "mesh" ? meshFill : basePartFill,
+    border: "1px solid rgba(0,0,0,0.14)",
+    boxShadow: "0 12px 30px rgba(0,0,0,0.1)"
+  }),
+  bracketTopFlange: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    left: "50%",
+    top: 42,
+    transform: "translateX(-50%)",
+    width: 190,
+    height: 34,
+    borderRadius: 8,
+    background: mode === "mesh" ? "#d7d7d5" : "#c5c5c3",
+    border: "1px solid rgba(0,0,0,0.14)"
+  }),
+  bracketBottomFlange: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    left: "50%",
+    top: 228,
+    transform: "translateX(-50%)",
+    width: 190,
+    height: 34,
+    borderRadius: 8,
+    background: mode === "mesh" ? "#d7d7d5" : "#c5c5c3",
+    border: "1px solid rgba(0,0,0,0.14)"
+  }),
+  bracketWebLeft: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    left: 64,
+    top: 86,
+    width: 34,
+    height: 132,
+    transform: "skewX(-14deg)",
+    background: mode === "mesh" ? "#bdbdbb" : "#adadab",
+    border: "1px solid rgba(0,0,0,0.1)"
+  }),
+  bracketWebRight: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    right: 64,
+    top: 86,
+    width: 34,
+    height: 132,
+    transform: "skewX(14deg)",
+    background: mode === "mesh" ? "#bdbdbb" : "#adadab",
+    border: "1px solid rgba(0,0,0,0.1)"
+  }),
+  bracketBoltA: (mode: ViewerMode): CSSProperties => boltStyle(54, 50, mode),
+  bracketBoltB: (mode: ViewerMode): CSSProperties => boltStyle(156, 50, mode),
+  bracketBoltC: (mode: ViewerMode): CSSProperties => boltStyle(54, 236, mode),
+  bracketBoltD: (mode: ViewerMode): CSSProperties => boltStyle(156, 236, mode),
+
+  nozzleChamber: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    left: "50%",
+    top: 20,
+    transform: "translateX(-50%)",
+    width: 92,
+    height: 92,
+    borderRadius: "26px 26px 16px 16px",
+    background: mode === "mesh" ? meshFill : basePartFill,
+    border: "1px solid rgba(0,0,0,0.14)",
+    boxShadow: "0 12px 30px rgba(0,0,0,0.1)"
+  }),
+  nozzleThroat: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    left: "50%",
+    top: 104,
+    transform: "translateX(-50%)",
+    width: 48,
+    height: 44,
+    background: mode === "mesh" ? "#b8b8b6" : "#a8a8a6",
+    border: "1px solid rgba(0,0,0,0.14)"
+  }),
+  nozzleBell: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    left: "50%",
+    top: 138,
+    transform: "translateX(-50%)",
+    width: 170,
+    height: 150,
+    background: mode === "mesh" ? meshFill : basePartFill,
+    clipPath: "polygon(36% 0%, 64% 0%, 100% 100%, 0% 100%)",
+    border: "1px solid rgba(0,0,0,0.14)"
+  }),
+  nozzleExitRing: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    left: "50%",
+    top: 278,
+    transform: "translateX(-50%)",
+    width: 186,
+    height: 22,
+    borderRadius: 12,
+    background: mode === "mesh" ? "#b6b6b4" : "#9f9f9d",
+    border: "1px solid rgba(0,0,0,0.16)"
+  }),
+  vesselTop: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    left: "50%",
+    top: 36,
+    transform: "translateX(-50%)",
+    width: 126,
+    height: 62,
+    borderRadius: "70px 70px 18px 18px",
+    background: mode === "mesh" ? meshFill : basePartFill,
+    border: "1px solid rgba(0,0,0,0.12)"
+  }),
+  vesselBody: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    left: "50%",
+    top: 84,
+    transform: "translateX(-50%)",
+    width: 132,
+    height: 152,
+    background: mode === "mesh" ? meshFill : basePartFill,
+    border: "1px solid rgba(0,0,0,0.12)"
+  }),
+  vesselBottom: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    left: "50%",
+    top: 218,
+    transform: "translateX(-50%)",
+    width: 126,
+    height: 62,
+    borderRadius: "18px 18px 70px 70px",
+    background: mode === "mesh" ? meshFill : basePartFill,
+    border: "1px solid rgba(0,0,0,0.12)"
+  }),
+  vesselBandA: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    left: "50%",
+    top: 118,
+    transform: "translateX(-50%)",
+    width: 146,
+    height: 14,
+    background: mode === "mesh" ? "#bebebc" : "#b1b1af",
+    border: "1px solid rgba(0,0,0,0.14)"
+  }),
+  vesselBandB: (mode: ViewerMode): CSSProperties => ({
+    position: "absolute",
+    left: "50%",
+    top: 190,
+    transform: "translateX(-50%)",
+    width: 146,
+    height: 14,
+    background: mode === "mesh" ? "#bebebc" : "#b1b1af",
+    border: "1px solid rgba(0,0,0,0.14)"
+  }),
+
   tip: (mode: ViewerMode): CSSProperties => ({
     position: "absolute",
     left: "50%",
@@ -621,7 +931,7 @@ const shapeStyles = {
     background: mode === "mesh" ? "#b5b5b3" : "#a8a8a6",
     border: "1px solid rgba(0,0,0,0.14)"
   }),
-  nozzleHint: (mode: ViewerMode): CSSProperties => ({
+  legacyNozzleHint: (mode: ViewerMode): CSSProperties => ({
     position: "absolute",
     left: "50%",
     bottom: 16,
@@ -783,6 +1093,22 @@ const shapeStyles = {
     height: 254,
     background: "rgba(0,0,0,0.16)"
   }),
+  nozzleMeshA: {
+    position: "absolute",
+    left: 60,
+    top: 150,
+    width: 132,
+    borderTop: "1px solid rgba(0,0,0,0.16)",
+    transform: "rotate(72deg)"
+  } as CSSProperties,
+  nozzleMeshB: {
+    position: "absolute",
+    left: 38,
+    top: 150,
+    width: 132,
+    borderTop: "1px solid rgba(0,0,0,0.16)",
+    transform: "rotate(-72deg)"
+  } as CSSProperties,
   armMeshA: {
     position: "absolute",
     left: 96,
@@ -839,3 +1165,17 @@ const shapeStyles = {
     transform: "rotate(-45deg)"
   } as CSSProperties
 };
+
+function boltStyle(left: number, top: number, mode: ViewerMode): CSSProperties {
+  return {
+    position: "absolute",
+    left,
+    top,
+    width: 20,
+    height: 20,
+    borderRadius: "50%",
+    background: mode === "mesh" ? "#eeeeec" : "#f6f6f4",
+    border: "3px solid rgba(0,0,0,0.18)",
+    boxSizing: "border-box"
+  };
+}
