@@ -8,26 +8,7 @@ import {
 
 import { runHighFidelityPipeline } from "../execution/highFidelityPipeline";
 
-import {
-  RemoteSimulationSubmitRequest,
-} from "../execution/remoteJobTypes";
-
-/**
- * ⚠️ This is your FIRST real worker server.
- *
- * Responsibilities:
- * - Accept simulation jobs over HTTP
- * - Run high-fidelity pipeline (Gmsh + CalculiX)
- * - Return results
- *
- * Right now:
- * - Uses mock job system
- * - Can run real solvers if container supports it
- *
- * Later:
- * - Replace mock storage with Redis / DB
- * - Add auth, rate limiting, scaling
- */
+import { RemoteSimulationSubmitRequest } from "../execution/remoteJobTypes";
 
 const PORT = Number(process.env.PORT ?? 8787);
 
@@ -35,32 +16,37 @@ const ENABLE_NATIVE_SOLVERS =
   process.env.HELVARIX_ENABLE_NATIVE_SOLVERS === "true";
 
 const WORKSPACE_ROOT =
-  process.env.HELVARIX_SOLVER_WORKSPACE_ROOT ??
-  "/tmp/helvarix-solver";
+  process.env.HELVARIX_SOLVER_WORKSPACE_ROOT ?? "/tmp/helvarix-solver";
 
-const GMSH_EXEC =
-  process.env.HELVARIX_GMSH_EXECUTABLE ?? "gmsh";
-
-const CCX_EXEC =
-  process.env.HELVARIX_CALCULIX_EXECUTABLE ?? "ccx";
+const GMSH_EXEC = process.env.HELVARIX_GMSH_EXECUTABLE ?? "gmsh";
+const CCX_EXEC = process.env.HELVARIX_CALCULIX_EXECUTABLE ?? "ccx";
 
 const server = http.createServer(async (req, res) => {
   try {
+    setCors(res);
+
+    if (req.method === "OPTIONS") {
+      return respond(res, 204, {});
+    }
+
     if (!req.url) {
       return respond(res, 400, { error: "Missing URL" });
+    }
+
+    if (req.method === "GET" && req.url === "/health") {
+      return respond(res, 200, {
+        ok: true,
+        service: "helvarix-solver-worker",
+        nativeSolversEnabled: ENABLE_NATIVE_SOLVERS,
+        timestamp: new Date().toISOString(),
+      });
     }
 
     if (req.method === "POST" && req.url === "/simulation/submit") {
       const body = await readJsonBody<RemoteSimulationSubmitRequest>(req);
 
-      /**
-       * STEP 1 — register job (mock store)
-       */
       const submitResponse = await submitRemoteSimulationMock(body);
 
-      /**
-       * STEP 2 — run high-fidelity in background (REAL ENGINE)
-       */
       void runWorkerPipeline(body, submitResponse.remoteJobId);
 
       return respond(res, 200, submitResponse);
@@ -86,21 +72,18 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`🚀 Helvarix Solver Worker running on port ${PORT}`);
-  console.log(`⚙️ Native solvers: ${ENABLE_NATIVE_SOLVERS}`);
-  console.log(`📁 Workspace: ${WORKSPACE_ROOT}`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Helvarix Solver Worker running on port ${PORT}`);
+  console.log(`Native solvers enabled: ${ENABLE_NATIVE_SOLVERS}`);
+  console.log(`Workspace root: ${WORKSPACE_ROOT}`);
 });
 
-/**
- * 🔥 CORE WORKER PIPELINE
- */
 async function runWorkerPipeline(
   payload: RemoteSimulationSubmitRequest,
   jobId: string
 ) {
   try {
-    console.log(`🧠 Running high-fidelity pipeline for job ${jobId}`);
+    console.log(`Running high-fidelity pipeline for job ${jobId}`);
 
     const result = await runHighFidelityPipeline(payload.request, {
       enableDiskWrite: true,
@@ -110,33 +93,28 @@ async function runWorkerPipeline(
       calculixExecutable: CCX_EXEC,
     });
 
-    console.log(
-      `✅ Job ${jobId} complete | score=${result.result.score.total}`
-    );
-
-    /**
-     * NOTE:
-     * Right now, results are not persisted back into the mock store.
-     * The mock store already runs runSimulation() internally.
-     *
-     * Next upgrade:
-     * - Replace mock system
-     * - Persist high-fidelity results here
-     */
-
+    console.log(`Job ${jobId} complete | score=${result.result.score.total}`);
   } catch (err) {
-    console.error(`❌ Job ${jobId} failed`, err);
+    console.error(`Job ${jobId} failed`, err);
   }
 }
 
-/**
- * Utils
- */
+function setCors(res: http.ServerResponse) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
 
 function respond(res: http.ServerResponse, status: number, data: unknown) {
   res.writeHead(status, {
     "Content-Type": "application/json",
   });
+
+  if (status === 204) {
+    res.end();
+    return;
+  }
+
   res.end(JSON.stringify(data));
 }
 
