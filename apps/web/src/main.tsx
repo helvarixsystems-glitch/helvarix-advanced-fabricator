@@ -1036,7 +1036,7 @@ function App() {
                     />
                     <MetricRow
                       label="Material"
-                      value={displayGeneration?.result?.derived.material ?? "—"}
+                      value={displayGeneration?.result?.derived?.material ?? "—"}
                     />
                     <MetricRow
                       label="Estimated Mass"
