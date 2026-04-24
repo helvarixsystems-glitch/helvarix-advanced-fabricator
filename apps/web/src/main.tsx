@@ -22,9 +22,7 @@ import {
 import { componentRegistry } from "@haf/component-registry";
 import "./styles.css";
 
-const API_BASE =
-  (globalThis as { __HAF_API__?: string }).__HAF_API__ ??
-  "'https://helvarix-advanced-fabricator.helvarixsystems.workers.dev'";
+const API_BASE = "https://helvarix-advanced-fabricator.helvarixsystems.workers.dev";
 
 const MATERIAL_OPTIONS = [
   { label: "PEEK-CF", value: "PEEK-CF" },
