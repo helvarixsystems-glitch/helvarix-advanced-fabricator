@@ -24,7 +24,7 @@ import "./styles.css";
 
 const API_BASE =
   (globalThis as { __HAF_API__?: string }).__HAF_API__ ??
-  "https://haf-api.YOUR-SUBDOMAIN.workers.dev";
+  "helvarix-advanced-fabricator.helvarixsystems.workers.dev";
 
 const MATERIAL_OPTIONS = [
   { label: "PEEK-CF", value: "PEEK-CF" },
