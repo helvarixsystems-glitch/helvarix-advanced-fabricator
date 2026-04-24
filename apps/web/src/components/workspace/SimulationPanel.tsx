@@ -9,9 +9,14 @@ import {
 type SimulationPanelProps = {
   apiBase: string;
   input: unknown;
+  showRunButton?: boolean;
 };
 
-export function SimulationPanel({ apiBase, input }: SimulationPanelProps) {
+export function SimulationPanel({
+  apiBase,
+  input,
+  showRunButton = true
+}: SimulationPanelProps) {
   const [simulationId, setSimulationId] = React.useState<string | null>(null);
   const [simulation, setSimulation] = React.useState<SimulationRecord | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
@@ -74,13 +79,22 @@ export function SimulationPanel({ apiBase, input }: SimulationPanelProps) {
           </span>
         </div>
 
-        <BlackButton
-          subdued
-          onClick={handleRunSimulation}
-          disabled={submitting || isRunning}
-        >
-          {submitting || isRunning ? "Running Simulation..." : "Run Simulation"}
-        </BlackButton>
+        {showRunButton ? (
+          <BlackButton
+            subdued
+            onClick={handleRunSimulation}
+            disabled={submitting || isRunning}
+          >
+            {submitting || isRunning ? "Running Simulation..." : "Run Simulation"}
+          </BlackButton>
+        ) : (
+          <div className="message">
+            <div className="message-title">Simulation Locked To Viewer Mode</div>
+            <div className="message-body">
+              Select the Simulation tab above the geometry window to run validation.
+            </div>
+          </div>
+        )}
 
         {simulation ? (
           <div className="simulation-metrics">
