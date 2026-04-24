@@ -14,9 +14,10 @@ export function GraphPaperRoom({
   mode?: ViewerMode;
   status?: string;
 }) {
-  const silhouette = geometry?.silhouette ?? "nosecone";
-  const family = silhouette as ComponentFamily;
-  const simulationLabel = getSimulationLabel(family);
+  const silhouette = geometry?.silhouette;
+  const family = silhouette as ComponentFamily | undefined;
+  const hasGeneratedGeometry = Boolean(family);
+  const simulationLabel = family ? getSimulationLabel(family) : "SIMULATION VIEW";
 
   return (
     <div style={styles.viewport}>
@@ -25,17 +26,28 @@ export function GraphPaperRoom({
         <div style={styles.floor} />
         <div style={styles.ambientGlow} />
 
-        {mode === "simulation" ? (
+        {mode === "simulation" && family ? (
           <SimulationBackdrop family={family} status={status} />
         ) : null}
 
         {mode === "mesh" ? <MeshBackdrop /> : null}
 
-        <div style={styles.shadow} />
+        {hasGeneratedGeometry && family ? (
+          <>
+            <div style={styles.shadow} />
 
-        <div style={getPartWrapperStyle(mode)}>
-          <PartShape family={family} mode={mode} />
-        </div>
+            <div style={getPartWrapperStyle(mode)}>
+              <PartShape family={family} mode={mode} />
+            </div>
+          </>
+        ) : (
+          <div style={styles.emptyViewerNotice}>
+            <div style={styles.emptyViewerTitle}>NO GENERATED GEOMETRY</div>
+            <div style={styles.emptyViewerText}>
+              Generate a concept to populate this workspace.
+            </div>
+          </div>
+        )}
 
         <div style={styles.overlayTop}>{title}</div>
 
@@ -46,14 +58,14 @@ export function GraphPaperRoom({
         <div style={styles.overlayBottom}>
           {geometry
             ? `${geometry.material} · ${geometry.lengthMm}MM · ${geometry.wallThicknessMm}MM WALL`
-            : "MM · CONCEPT MODE · FABRICATION BAY"}
+            : "GENERATE CONCEPT · NO GEOMETRY LOADED"}
         </div>
 
         {mode === "simulation" ? (
           <div style={styles.simulationHud}>
             <HudRow label="MODE" value={simulationLabel} />
             <HudRow label="FLOW STATE" value={status === "running" ? "ACTIVE" : "PREVIEW"} />
-            <HudRow label="GEOMETRY" value={family.toUpperCase()} />
+            <HudRow label="GEOMETRY" value={family ? family.toUpperCase() : "NONE"} />
           </div>
         ) : null}
 
@@ -320,6 +332,32 @@ const styles: Record<string, CSSProperties | ((status?: string) => CSSProperties
     background:
       "radial-gradient(ellipse at center, rgba(0,0,0,0.22) 0%, rgba(0,0,0,0.06) 54%, rgba(0,0,0,0) 78%)",
     filter: "blur(2px)"
+  },
+  emptyViewerNotice: {
+    position: "absolute",
+    left: "50%",
+    top: "50%",
+    transform: "translate(-50%, -50%)",
+    width: 280,
+    maxWidth: "calc(100% - 48px)",
+    padding: "18px 22px",
+    border: `1px solid ${theme.border}`,
+    background: "rgba(255,255,255,0.86)",
+    textAlign: "center",
+    zIndex: 4,
+    boxShadow: "0 18px 50px rgba(0,0,0,0.08)"
+  },
+  emptyViewerTitle: {
+    fontSize: 12,
+    fontWeight: 800,
+    letterSpacing: "0.16em",
+    color: theme.text
+  },
+  emptyViewerText: {
+    marginTop: 8,
+    fontSize: 12,
+    lineHeight: 1.45,
+    color: theme.muted
   },
   overlayTop: {
     position: "absolute",
@@ -599,246 +637,5 @@ const shapeStyles = {
     background: mode === "mesh" ? meshFill : basePartFill,
     border: "1px solid rgba(0,0,0,0.12)",
     boxShadow: "0 12px 30px rgba(0,0,0,0.1)"
-  }),
-  bandTop: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 114,
-    transform: "translateX(-50%)",
-    width: 126,
-    height: 14,
-    background: mode === "mesh" ? "#bebebc" : "#b1b1af",
-    border: "1px solid rgba(0,0,0,0.14)"
-  }),
-  bandMid: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 236,
-    transform: "translateX(-50%)",
-    width: 126,
-    height: 18,
-    background: mode === "mesh" ? "#b5b5b3" : "#a8a8a6",
-    border: "1px solid rgba(0,0,0,0.14)"
-  }),
-  nozzleHint: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    bottom: 16,
-    transform: "translateX(-50%)",
-    width: 74,
-    height: 42,
-    background: mode === "mesh" ? "linear-gradient(180deg, #8a8a89 0%, #737372 100%)" : darkMetal,
-    clipPath: "polygon(10% 0%, 90% 0%, 100% 100%, 0% 100%)"
-  }),
-
-  shellOuter: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 34,
-    transform: "translateX(-50%)",
-    width: 146,
-    height: 254,
-    background: mode === "mesh" ? meshFill : basePartFill,
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  shellInner: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 56,
-    transform: "translateX(-50%)",
-    width: 102,
-    height: 210,
-    background: mode === "mesh" ? "rgba(242,242,240,0.84)" : "rgba(255,255,255,0.45)",
-    border: "1px solid rgba(0,0,0,0.08)"
-  }),
-  shellBraceLeft: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: 54,
-    top: 120,
-    width: 26,
-    height: 82,
-    background: mode === "mesh" ? "#b6b6b4" : "#aaaaa8"
-  }),
-  shellBraceRight: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    right: 54,
-    top: 120,
-    width: 26,
-    height: 82,
-    background: mode === "mesh" ? "#b6b6b4" : "#aaaaa8"
-  }),
-
-  armBase: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: 42,
-    bottom: 46,
-    width: 58,
-    height: 58,
-    borderRadius: "50%",
-    background: mode === "mesh" ? "#d8d8d6" : "#c8c8c6",
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  armLink: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: 86,
-    top: 164,
-    width: 106,
-    height: 24,
-    background: mode === "mesh" ? meshFill : basePartFill,
-    transform: "rotate(-28deg)",
-    transformOrigin: "left center",
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  armJointA: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: 88,
-    top: 176,
-    width: 24,
-    height: 24,
-    borderRadius: "50%",
-    background: mode === "mesh" ? "#c8c8c6" : "#b8b8b6",
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  armJointB: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    right: 66,
-    top: 116,
-    width: 28,
-    height: 28,
-    borderRadius: "50%",
-    background: mode === "mesh" ? "#c8c8c6" : "#b8b8b6",
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  armHead: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    right: 34,
-    top: 82,
-    width: 72,
-    height: 42,
-    background: mode === "mesh" ? meshFill : basePartFill,
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-
-  finFrame: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 58,
-    transform: "translateX(-50%)",
-    width: 146,
-    height: 146,
-    background: mode === "mesh" ? meshFill : "linear-gradient(180deg, #d3d3d1 0%, #b7b7b5 100%)",
-    border: "10px solid rgba(0,0,0,0.18)"
-  }),
-  finGridA: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 102,
-    transform: "translateX(-50%)",
-    width: 126,
-    borderTop: `10px solid ${mode === "mesh" ? "#9d9d9b" : "#8f8f8d"}`
-  }),
-  finGridB: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 136,
-    transform: "translateX(-50%)",
-    width: 126,
-    borderTop: `10px solid ${mode === "mesh" ? "#9d9d9b" : "#8f8f8d"}`
-  }),
-  finGridC: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: 72,
-    top: 68,
-    width: 10,
-    height: 126,
-    background: mode === "mesh" ? "#9d9d9b" : "#8f8f8d"
-  }),
-  finGridD: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    right: 72,
-    top: 68,
-    width: 10,
-    height: 126,
-    background: mode === "mesh" ? "#9d9d9b" : "#8f8f8d"
-  }),
-
-  meshLine: (left: string, top: number, width: number): CSSProperties => ({
-    position: "absolute",
-    left,
-    top,
-    width,
-    borderTop: "1px solid rgba(0,0,0,0.18)",
-    transform: "translateX(-50%)"
-  }),
-  horizontalMesh: (top: number): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top,
-    width: 146,
-    borderTop: "1px solid rgba(0,0,0,0.18)",
-    transform: "translateX(-50%)"
-  }),
-  verticalMesh: (left: number): CSSProperties => ({
-    position: "absolute",
-    left,
-    top: 34,
-    width: 1,
-    height: 254,
-    background: "rgba(0,0,0,0.16)"
-  }),
-  armMeshA: {
-    position: "absolute",
-    left: 96,
-    top: 150,
-    width: 86,
-    borderTop: "1px solid rgba(0,0,0,0.18)",
-    transform: "rotate(-28deg)"
-  } as CSSProperties,
-  armMeshB: {
-    position: "absolute",
-    left: 108,
-    top: 170,
-    width: 66,
-    borderTop: "1px solid rgba(0,0,0,0.18)",
-    transform: "rotate(-28deg)"
-  } as CSSProperties,
-  armMeshC: {
-    position: "absolute",
-    right: 44,
-    top: 102,
-    width: 54,
-    borderTop: "1px solid rgba(0,0,0,0.18)"
-  } as CSSProperties,
-  finDiagA: {
-    position: "absolute",
-    left: 56,
-    top: 74,
-    width: 140,
-    borderTop: "1px solid rgba(0,0,0,0.16)",
-    transform: "rotate(45deg)"
-  } as CSSProperties,
-  finDiagB: {
-    position: "absolute",
-    left: 52,
-    top: 150,
-    width: 140,
-    borderTop: "1px solid rgba(0,0,0,0.16)",
-    transform: "rotate(-45deg)"
-  } as CSSProperties,
-  finDiagC: {
-    position: "absolute",
-    left: 74,
-    top: 64,
-    width: 120,
-    borderTop: "1px solid rgba(0,0,0,0.16)",
-    transform: "rotate(45deg)"
-  } as CSSProperties,
-  finDiagD: {
-    position: "absolute",
-    left: 58,
-    top: 140,
-    width: 120,
-    borderTop: "1px solid rgba(0,0,0,0.16)",
-    transform: "rotate(-45deg)"
-  } as CSSProperties
+  })
 };
