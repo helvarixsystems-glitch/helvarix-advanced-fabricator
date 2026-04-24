@@ -12,6 +12,18 @@ type VisualFamily =
   | "nosecone"
   | "shell";
 
+type Vec3 = [number, number, number];
+
+type MeshFace = {
+  indices: number[];
+  shade?: number;
+};
+
+type MeshModel = {
+  vertices: Vec3[];
+  faces: MeshFace[];
+};
+
 type SafeGeometry = GeometryPreview & {
   family?: string;
   silhouette?: string;
@@ -23,6 +35,7 @@ type SafeGeometry = GeometryPreview & {
   wallThicknessMm?: number;
   notes?: string[];
   dimensions?: Record<string, number>;
+  derived?: Record<string, any>;
   derivedParameters?: Record<string, unknown>;
 };
 
@@ -58,9 +71,7 @@ export function GraphPaperRoom({
         {hasGeneratedGeometry && family ? (
           <>
             <div style={styles.shadow} />
-            <div style={getPartWrapperStyle(mode, family)}>
-              <PartShape family={family} mode={mode} />
-            </div>
+            <GeneratedMesh geometry={safeGeometry} family={family} mode={mode} status={status} />
           </>
         ) : null}
 
@@ -100,6 +111,586 @@ export function GraphPaperRoom({
   );
 }
 
+function GeneratedMesh({
+  geometry,
+  family,
+  mode,
+  status
+}: {
+  geometry: SafeGeometry;
+  family: VisualFamily;
+  mode: ViewerMode;
+  status: string;
+}) {
+  const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const [rotation, setRotation] = React.useState(() => ({
+    x: family === "bell-nozzle" ? -0.22 : -0.42,
+    y: family === "bell-nozzle" ? 0.48 : 0.7
+  }));
+
+  const dragRef = React.useRef<{ x: number; y: number } | null>(null);
+
+  React.useEffect(() => {
+    setRotation({
+      x: family === "bell-nozzle" ? -0.22 : -0.42,
+      y: family === "bell-nozzle" ? 0.48 : 0.7
+    });
+  }, [family]);
+
+  React.useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const draw = () => {
+      const rect = canvas.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+
+      canvas.width = Math.max(1, Math.floor(rect.width * ratio));
+      canvas.height = Math.max(1, Math.floor(rect.height * ratio));
+
+      drawGeneratedMesh(canvas, geometry, family, mode, status, rotation, ratio);
+    };
+
+    draw();
+
+    const observer = new ResizeObserver(draw);
+    observer.observe(canvas);
+
+    return () => observer.disconnect();
+  }, [geometry, family, mode, status, rotation]);
+
+  return (
+    <div style={styles.meshCanvasWrap}>
+      <canvas
+        ref={canvasRef}
+        style={styles.meshCanvas}
+        onPointerDown={(event) => {
+          dragRef.current = { x: event.clientX, y: event.clientY };
+          event.currentTarget.setPointerCapture(event.pointerId);
+        }}
+        onPointerMove={(event) => {
+          if (!dragRef.current) return;
+
+          const dx = event.clientX - dragRef.current.x;
+          const dy = event.clientY - dragRef.current.y;
+
+          dragRef.current = { x: event.clientX, y: event.clientY };
+
+          setRotation((current) => ({
+            x: clamp(current.x + dy * 0.008, -1.25, 1.25),
+            y: current.y + dx * 0.008
+          }));
+        }}
+        onPointerUp={() => {
+          dragRef.current = null;
+        }}
+        onPointerCancel={() => {
+          dragRef.current = null;
+        }}
+      />
+
+      <div style={styles.meshHint}>DRAG TO ROTATE</div>
+    </div>
+  );
+}
+
+function drawGeneratedMesh(
+  canvas: HTMLCanvasElement,
+  geometry: SafeGeometry,
+  family: VisualFamily,
+  mode: ViewerMode,
+  status: string,
+  rotation: { x: number; y: number },
+  ratio: number
+) {
+  const context = canvas.getContext("2d");
+  if (!context) return;
+
+  context.clearRect(0, 0, canvas.width, canvas.height);
+
+  const mesh = buildMeshForFamily(geometry, family);
+  const projected = mesh.vertices.map((vertex) =>
+    projectVertex(rotateVertex(vertex, rotation.x, rotation.y), canvas.width, canvas.height)
+  );
+
+  const faces = mesh.faces
+    .map((face) => {
+      const points = face.indices.map((index) => projected[index]);
+      const z =
+        face.indices.reduce((sum, index) => {
+          const rotated = rotateVertex(mesh.vertices[index], rotation.x, rotation.y);
+          return sum + rotated[2];
+        }, 0) / Math.max(face.indices.length, 1);
+
+      return { face, points, z };
+    })
+    .sort((a, b) => a.z - b.z);
+
+  context.save();
+
+  for (const item of faces) {
+    if (item.points.length < 3) continue;
+
+    context.beginPath();
+    context.moveTo(item.points[0][0], item.points[0][1]);
+
+    for (let index = 1; index < item.points.length; index += 1) {
+      context.lineTo(item.points[index][0], item.points[index][1]);
+    }
+
+    context.closePath();
+
+    const shade = item.face.shade ?? 0.74;
+    const materialTone = getMaterialTone(geometry.material);
+
+    if (mode === "simulation") {
+      context.fillStyle =
+        family === "bell-nozzle" || family === "grid-fin" || family === "nosecone"
+          ? `rgba(${Math.floor(125 * shade)}, ${Math.floor(145 * shade)}, ${Math.floor(
+              170 * shade
+            )}, 0.94)`
+          : `rgba(${Math.floor(160 * shade)}, ${Math.floor(128 * shade)}, ${Math.floor(
+              86 * shade
+            )}, 0.94)`;
+    } else {
+      context.fillStyle = `rgba(${Math.floor(materialTone[0] * shade)}, ${Math.floor(
+        materialTone[1] * shade
+      )}, ${Math.floor(materialTone[2] * shade)}, 0.97)`;
+    }
+
+    context.strokeStyle = mode === "mesh" ? "rgba(0,0,0,0.44)" : "rgba(0,0,0,0.18)";
+    context.lineWidth = mode === "mesh" ? 1.2 * ratio : 0.8 * ratio;
+
+    context.fill();
+    context.stroke();
+  }
+
+  if (mode === "mesh") {
+    drawMeshWireframe(context, mesh, projected, ratio);
+  }
+
+  if (mode === "simulation") {
+    drawMeshStressOverlay(context, canvas.width, canvas.height, family, status, ratio);
+  }
+
+  context.restore();
+}
+
+function drawMeshWireframe(
+  context: CanvasRenderingContext2D,
+  mesh: MeshModel,
+  projected: Array<[number, number]>,
+  ratio: number
+) {
+  context.save();
+  context.strokeStyle = "rgba(0,0,0,0.28)";
+  context.lineWidth = 0.8 * ratio;
+
+  for (const face of mesh.faces) {
+    const points = face.indices.map((index) => projected[index]);
+    if (points.length < 3) continue;
+
+    context.beginPath();
+    context.moveTo(points[0][0], points[0][1]);
+
+    for (let index = 1; index < points.length; index += 1) {
+      context.lineTo(points[index][0], points[index][1]);
+    }
+
+    context.closePath();
+    context.stroke();
+  }
+
+  context.restore();
+}
+
+function drawMeshStressOverlay(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  family: VisualFamily,
+  status: string,
+  ratio: number
+) {
+  context.save();
+
+  const isFlowFamily = family === "bell-nozzle" || family === "grid-fin" || family === "nosecone";
+
+  context.globalAlpha = status === "running" ? 0.92 : 0.58;
+  context.strokeStyle = isFlowFamily ? "rgba(60, 105, 150, 0.48)" : "rgba(150, 92, 35, 0.44)";
+  context.lineWidth = 2 * ratio;
+  context.setLineDash([10 * ratio, 8 * ratio]);
+
+  for (let index = 0; index < 5; index += 1) {
+    const y = height * (0.27 + index * 0.095);
+    context.beginPath();
+
+    if (isFlowFamily) {
+      context.moveTo(width * 0.12, y);
+      context.bezierCurveTo(width * 0.34, y - 16 * ratio, width * 0.62, y + 18 * ratio, width * 0.9, y);
+    } else {
+      context.moveTo(width * 0.28, y);
+      context.lineTo(width * 0.72, y - 28 * ratio);
+    }
+
+    context.stroke();
+  }
+
+  context.restore();
+}
+
+function buildMeshForFamily(geometry: SafeGeometry, family: VisualFamily): MeshModel {
+  if (family === "bell-nozzle") return buildBellNozzleMesh(geometry);
+  if (family === "pressure-vessel") return buildPressureVesselMesh(geometry);
+  if (family === "rover-arm") return buildRoverArmMesh(geometry);
+  if (family === "grid-fin") return buildGridFinMesh(geometry);
+  if (family === "nosecone") return buildNoseconeMesh(geometry);
+  if (family === "shell") return buildShellMesh(geometry);
+
+  return buildStructuralBracketMesh(geometry);
+}
+
+function buildStructuralBracketMesh(geometry: SafeGeometry): MeshModel {
+  const width = getDimension(geometry, "widthMm", 140);
+  const height = getDimension(geometry, "heightMm", 120);
+  const depth = getDimension(geometry, "depthMm", 52);
+  const wall = getDimension(geometry, "wallThicknessMm", 7);
+
+  const mesh = createEmptyMesh();
+
+  addBox(mesh, [-width / 2, -height / 2, -depth / 2], [width / 2, -height / 2 + wall, depth / 2]);
+  addBox(mesh, [-width / 2, height / 2 - wall, -depth / 2], [width / 2, height / 2, depth / 2]);
+  addBox(mesh, [-width / 2, -height / 2, -depth / 2], [-width / 2 + wall, height / 2, depth / 2]);
+  addBox(mesh, [width / 2 - wall, -height / 2, -depth / 2], [width / 2, height / 2, depth / 2]);
+
+  const ribWidth = Math.max(wall * 1.6, width * 0.08);
+  addBox(mesh, [-ribWidth / 2, -height / 2 + wall, -depth / 2], [ribWidth / 2, height / 2 - wall, depth / 2]);
+
+  addTriangularPrism(mesh, width, height, depth, wall, -1);
+  addTriangularPrism(mesh, width, height, depth, wall, 1);
+
+  const boltRadius = Math.max(wall * 0.8, width * 0.035);
+  addBoltBoss(mesh, -width * 0.31, -height * 0.36, depth, boltRadius);
+  addBoltBoss(mesh, width * 0.31, -height * 0.36, depth, boltRadius);
+  addBoltBoss(mesh, -width * 0.31, height * 0.36, depth, boltRadius);
+  addBoltBoss(mesh, width * 0.31, height * 0.36, depth, boltRadius);
+
+  return centerAndScaleMesh(mesh);
+}
+
+function buildBellNozzleMesh(geometry: SafeGeometry): MeshModel {
+  const derived = getDerivedParameters(geometry);
+
+  const length = getDimension(geometry, "lengthMm", 180);
+  const exitDiameter =
+    numberFrom(derived.exitDiameterMm) ?? getDimension(geometry, "widthMm", 110);
+  const throatDiameter = numberFrom(derived.throatDiameterMm) ?? exitDiameter * 0.28;
+  const wall = getDimension(geometry, "wallThicknessMm", 3.2);
+  const chamberDiameter = Math.max(throatDiameter * 2.4, exitDiameter * 0.42);
+
+  const stations = [
+    { z: -length * 0.5, radius: chamberDiameter / 2 },
+    { z: -length * 0.31, radius: chamberDiameter / 2 },
+    { z: -length * 0.13, radius: throatDiameter / 2 },
+    { z: length * 0.12, radius: exitDiameter * 0.31 },
+    { z: length * 0.34, radius: exitDiameter * 0.43 },
+    { z: length * 0.5, radius: exitDiameter / 2 }
+  ];
+
+  return centerAndScaleMesh(createLatheMesh(stations, 32, wall));
+}
+
+function buildPressureVesselMesh(geometry: SafeGeometry): MeshModel {
+  const length = getDimension(geometry, "lengthMm", 170);
+  const diameter = Math.max(getDimension(geometry, "widthMm", 96), getDimension(geometry, "heightMm", 96));
+  const wall = getDimension(geometry, "wallThicknessMm", 4);
+
+  const stations = [
+    { z: -length / 2, radius: diameter * 0.08 },
+    { z: -length * 0.42, radius: diameter / 2 },
+    { z: length * 0.42, radius: diameter / 2 },
+    { z: length / 2, radius: diameter * 0.08 }
+  ];
+
+  return centerAndScaleMesh(createLatheMesh(stations, 28, wall));
+}
+
+function buildRoverArmMesh(geometry: SafeGeometry): MeshModel {
+  const length = getDimension(geometry, "lengthMm", 170);
+  const width = getDimension(geometry, "widthMm", 48);
+  const depth = getDimension(geometry, "depthMm", 34);
+  const wall = getDimension(geometry, "wallThicknessMm", 6);
+
+  const mesh = createEmptyMesh();
+
+  addBox(mesh, [-length / 2, -wall, -depth / 2], [length / 2, wall, depth / 2]);
+  addBox(mesh, [-length / 2 - width / 2, -width / 2, -depth / 2], [-length / 2 + width / 2, width / 2, depth / 2]);
+  addBox(mesh, [length / 2 - width / 2, -width / 2, -depth / 2], [length / 2 + width / 2, width / 2, depth / 2]);
+  addBox(mesh, [-length * 0.18, -width * 0.18, -depth / 2], [length * 0.18, width * 0.18, depth / 2]);
+
+  return centerAndScaleMesh(mesh);
+}
+
+function buildGridFinMesh(geometry: SafeGeometry): MeshModel {
+  const width = getDimension(geometry, "widthMm", 132);
+  const height = getDimension(geometry, "heightMm", 132);
+  const depth = getDimension(geometry, "depthMm", 20);
+  const wall = getDimension(geometry, "wallThicknessMm", 6);
+
+  const mesh = createEmptyMesh();
+
+  addBox(mesh, [-width / 2, -height / 2, -depth / 2], [width / 2, -height / 2 + wall, depth / 2]);
+  addBox(mesh, [-width / 2, height / 2 - wall, -depth / 2], [width / 2, height / 2, depth / 2]);
+  addBox(mesh, [-width / 2, -height / 2, -depth / 2], [-width / 2 + wall, height / 2, depth / 2]);
+  addBox(mesh, [width / 2 - wall, -height / 2, -depth / 2], [width / 2, height / 2, depth / 2]);
+
+  for (const offset of [-0.25, 0, 0.25]) {
+    const x = width * offset;
+    const y = height * offset;
+    addBox(mesh, [x - wall / 2, -height / 2, -depth / 2], [x + wall / 2, height / 2, depth / 2]);
+    addBox(mesh, [-width / 2, y - wall / 2, -depth / 2], [width / 2, y + wall / 2, depth / 2]);
+  }
+
+  return centerAndScaleMesh(mesh);
+}
+
+function buildNoseconeMesh(geometry: SafeGeometry): MeshModel {
+  const length = getDimension(geometry, "lengthMm", 190);
+  const diameter = getDimension(geometry, "widthMm", 80);
+  const wall = getDimension(geometry, "wallThicknessMm", 3);
+
+  const stations = [
+    { z: -length / 2, radius: diameter / 2 },
+    { z: -length * 0.18, radius: diameter * 0.45 },
+    { z: length * 0.18, radius: diameter * 0.25 },
+    { z: length / 2, radius: diameter * 0.02 }
+  ];
+
+  return centerAndScaleMesh(createLatheMesh(stations, 28, wall));
+}
+
+function buildShellMesh(geometry: SafeGeometry): MeshModel {
+  const width = getDimension(geometry, "widthMm", 120);
+  const height = getDimension(geometry, "heightMm", 160);
+  const depth = getDimension(geometry, "depthMm", 36);
+  const wall = getDimension(geometry, "wallThicknessMm", 6);
+
+  const mesh = createEmptyMesh();
+
+  addBox(mesh, [-width / 2, -height / 2, -depth / 2], [width / 2, height / 2, depth / 2]);
+  addBox(mesh, [-width / 2 + wall * 1.6, -height / 2 + wall * 1.6, -depth / 2 - 1], [
+    width / 2 - wall * 1.6,
+    height / 2 - wall * 1.6,
+    depth / 2 + 1
+  ]);
+
+  return centerAndScaleMesh(mesh);
+}
+
+function createLatheMesh(
+  stations: Array<{ z: number; radius: number }>,
+  segments: number,
+  wallThickness: number
+): MeshModel {
+  const mesh = createEmptyMesh();
+
+  for (const station of stations) {
+    for (let index = 0; index < segments; index += 1) {
+      const angle = (Math.PI * 2 * index) / segments;
+      mesh.vertices.push([
+        Math.cos(angle) * station.radius,
+        Math.sin(angle) * station.radius,
+        station.z
+      ]);
+    }
+  }
+
+  for (let stationIndex = 0; stationIndex < stations.length - 1; stationIndex += 1) {
+    for (let segmentIndex = 0; segmentIndex < segments; segmentIndex += 1) {
+      const next = (segmentIndex + 1) % segments;
+      mesh.faces.push({
+        indices: [
+          stationIndex * segments + segmentIndex,
+          stationIndex * segments + next,
+          (stationIndex + 1) * segments + next,
+          (stationIndex + 1) * segments + segmentIndex
+        ],
+        shade: 0.66 + (stationIndex / stations.length) * 0.22
+      });
+    }
+  }
+
+  const largestRadius = Math.max(...stations.map((station) => station.radius), 1);
+  const innerScale = clamp(1 - wallThickness / largestRadius, 0.42, 0.94);
+  const innerStart = mesh.vertices.length;
+
+  for (const station of stations) {
+    for (let index = 0; index < segments; index += 1) {
+      const angle = (Math.PI * 2 * index) / segments;
+      mesh.vertices.push([
+        Math.cos(angle) * station.radius * innerScale,
+        Math.sin(angle) * station.radius * innerScale,
+        station.z
+      ]);
+    }
+  }
+
+  for (let stationIndex = 0; stationIndex < stations.length - 1; stationIndex += 1) {
+    for (let segmentIndex = 0; segmentIndex < segments; segmentIndex += 1) {
+      const next = (segmentIndex + 1) % segments;
+      mesh.faces.push({
+        indices: [
+          innerStart + stationIndex * segments + segmentIndex,
+          innerStart + (stationIndex + 1) * segments + segmentIndex,
+          innerStart + (stationIndex + 1) * segments + next,
+          innerStart + stationIndex * segments + next
+        ],
+        shade: 0.44
+      });
+    }
+  }
+
+  return mesh;
+}
+
+function addBox(mesh: MeshModel, min: Vec3, max: Vec3) {
+  const start = mesh.vertices.length;
+  const [x0, y0, z0] = min;
+  const [x1, y1, z1] = max;
+
+  mesh.vertices.push(
+    [x0, y0, z0],
+    [x1, y0, z0],
+    [x1, y1, z0],
+    [x0, y1, z0],
+    [x0, y0, z1],
+    [x1, y0, z1],
+    [x1, y1, z1],
+    [x0, y1, z1]
+  );
+
+  mesh.faces.push(
+    { indices: [start + 0, start + 1, start + 2, start + 3], shade: 0.62 },
+    { indices: [start + 4, start + 7, start + 6, start + 5], shade: 0.86 },
+    { indices: [start + 0, start + 4, start + 5, start + 1], shade: 0.74 },
+    { indices: [start + 1, start + 5, start + 6, start + 2], shade: 0.78 },
+    { indices: [start + 2, start + 6, start + 7, start + 3], shade: 0.7 },
+    { indices: [start + 3, start + 7, start + 4, start + 0], shade: 0.58 }
+  );
+}
+
+function addTriangularPrism(
+  mesh: MeshModel,
+  width: number,
+  height: number,
+  depth: number,
+  wall: number,
+  side: -1 | 1
+) {
+  const start = mesh.vertices.length;
+  const x0 = side < 0 ? -width / 2 + wall : width / 2 - wall;
+  const x1 = side < 0 ? -width * 0.12 : width * 0.12;
+  const y0 = -height / 2 + wall;
+  const y1 = height / 2 - wall;
+  const z0 = -depth / 2;
+  const z1 = depth / 2;
+
+  mesh.vertices.push(
+    [x0, y0, z0],
+    [x1, y0, z0],
+    [x0, y1, z0],
+    [x0, y0, z1],
+    [x1, y0, z1],
+    [x0, y1, z1]
+  );
+
+  mesh.faces.push(
+    { indices: [start + 0, start + 1, start + 2], shade: 0.64 },
+    { indices: [start + 3, start + 5, start + 4], shade: 0.82 },
+    { indices: [start + 0, start + 3, start + 4, start + 1], shade: 0.76 },
+    { indices: [start + 1, start + 4, start + 5, start + 2], shade: 0.68 },
+    { indices: [start + 2, start + 5, start + 3, start + 0], shade: 0.58 }
+  );
+}
+
+function addBoltBoss(mesh: MeshModel, x: number, y: number, depth: number, radius: number) {
+  const segments = 12;
+  const z0 = depth / 2;
+  const z1 = depth / 2 + radius * 0.55;
+  const start = mesh.vertices.length;
+
+  for (let layer = 0; layer < 2; layer += 1) {
+    for (let index = 0; index < segments; index += 1) {
+      const angle = (Math.PI * 2 * index) / segments;
+      mesh.vertices.push([
+        x + Math.cos(angle) * radius,
+        y + Math.sin(angle) * radius,
+        layer === 0 ? z0 : z1
+      ]);
+    }
+  }
+
+  for (let index = 0; index < segments; index += 1) {
+    const next = (index + 1) % segments;
+    mesh.faces.push({
+      indices: [start + index, start + next, start + segments + next, start + segments + index],
+      shade: 0.82
+    });
+  }
+}
+
+function createEmptyMesh(): MeshModel {
+  return {
+    vertices: [],
+    faces: []
+  };
+}
+
+function centerAndScaleMesh(mesh: MeshModel): MeshModel {
+  if (!mesh.vertices.length) return mesh;
+
+  const xs = mesh.vertices.map((vertex) => vertex[0]);
+  const ys = mesh.vertices.map((vertex) => vertex[1]);
+  const zs = mesh.vertices.map((vertex) => vertex[2]);
+
+  const centerX = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const centerY = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const centerZ = (Math.min(...zs) + Math.max(...zs)) / 2;
+
+  return {
+    vertices: mesh.vertices.map(([x, y, z]) => [x - centerX, y - centerY, z - centerZ]),
+    faces: mesh.faces
+  };
+}
+
+function rotateVertex(vertex: Vec3, rx: number, ry: number): Vec3 {
+  const [x, y, z] = vertex;
+
+  const cosY = Math.cos(ry);
+  const sinY = Math.sin(ry);
+
+  const x1 = x * cosY + z * sinY;
+  const z1 = -x * sinY + z * cosY;
+
+  const cosX = Math.cos(rx);
+  const sinX = Math.sin(rx);
+
+  const y2 = y * cosX - z1 * sinX;
+  const z2 = y * sinX + z1 * cosX;
+
+  return [x1, y2, z2];
+}
+
+function projectVertex(vertex: Vec3, width: number, height: number): [number, number] {
+  const [x, y, z] = vertex;
+  const sceneSize = Math.min(width, height);
+  const scale = sceneSize * 0.0043;
+  const distance = sceneSize * 0.9;
+  const perspective = distance / Math.max(distance + z * scale * 85, 1);
+
+  return [width / 2 + x * scale * perspective, height / 2 - y * scale * perspective];
+}
+
 function normalizeFamily(geometry?: SafeGeometry): VisualFamily | undefined {
   const rawFamily = geometry?.family ?? geometry?.silhouette;
 
@@ -110,7 +701,6 @@ function normalizeFamily(geometry?: SafeGeometry): VisualFamily | undefined {
   if (rawFamily === "pressure-vessel") return "pressure-vessel";
   if (rawFamily === "rover-arm") return "rover-arm";
   if (rawFamily === "grid-fin") return "grid-fin";
-
   if (rawFamily === "nosecone") return "nosecone";
   if (rawFamily === "shell") return "shell";
 
@@ -119,26 +709,63 @@ function normalizeFamily(geometry?: SafeGeometry): VisualFamily | undefined {
 
 function formatGeometryLabel(geometry: SafeGeometry) {
   const material = geometry.material ?? "MATERIAL TBD";
-
   const primaryLength =
-    geometry.lengthMm ??
-    geometry.heightMm ??
-    geometry.widthMm ??
-    geometry.dimensions?.lengthMm ??
-    geometry.dimensions?.heightMm ??
-    geometry.dimensions?.widthMm;
+    getDimensionOptional(geometry, "lengthMm") ??
+    getDimensionOptional(geometry, "heightMm") ??
+    getDimensionOptional(geometry, "widthMm");
 
-  const wallThickness =
-    geometry.wallThicknessMm ??
-    geometry.dimensions?.wallThicknessMm ??
-    geometry.dimensions?.thicknessMm;
+  const wallThickness = getDimensionOptional(geometry, "wallThicknessMm");
 
   return `${material} · ${formatNumber(primaryLength)}MM · ${formatNumber(wallThickness)}MM WALL`;
+}
+
+function getDimension(geometry: SafeGeometry, key: string, fallback: number) {
+  return getDimensionOptional(geometry, key) ?? fallback;
+}
+
+function getDimensionOptional(geometry: SafeGeometry, key: string) {
+  const direct = (geometry as Record<string, unknown>)[key];
+  if (typeof direct === "number" && !Number.isNaN(direct)) return direct;
+
+  const dimension = geometry.dimensions?.[key];
+  if (typeof dimension === "number" && !Number.isNaN(dimension)) return dimension;
+
+  const derivedValue = geometry.derived?.[key];
+  if (typeof derivedValue === "number" && !Number.isNaN(derivedValue)) return derivedValue;
+
+  return undefined;
+}
+
+function getDerivedParameters(geometry: SafeGeometry) {
+  return (
+    geometry.derivedParameters ??
+    geometry.derived?.derivedParameters ??
+    geometry.derived?.derived ??
+    {}
+  ) as Record<string, unknown>;
+}
+
+function getMaterialTone(material?: string): [number, number, number] {
+  if (!material) return [210, 210, 206];
+
+  const normalized = material.toLowerCase();
+
+  if (normalized.includes("inconel")) return [205, 204, 198];
+  if (normalized.includes("titanium") || normalized.includes("ti-")) return [196, 202, 207];
+  if (normalized.includes("copper") || normalized.includes("grcop")) return [214, 178, 136];
+  if (normalized.includes("niobium") || normalized.includes("c103")) return [194, 190, 204];
+  if (normalized.includes("al")) return [216, 216, 210];
+
+  return [210, 210, 206];
 }
 
 function formatNumber(value?: number) {
   if (typeof value !== "number" || Number.isNaN(value)) return "—";
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function numberFrom(value: unknown) {
+  return typeof value === "number" && !Number.isNaN(value) ? value : undefined;
 }
 
 function HudRow({ label, value }: { label: string; value: string }) {
@@ -147,175 +774,6 @@ function HudRow({ label, value }: { label: string; value: string }) {
       <span style={styles.hudLabel}>{label}</span>
       <span style={styles.hudValue}>{value}</span>
     </div>
-  );
-}
-
-function PartShape({
-  family,
-  mode
-}: {
-  family: VisualFamily;
-  mode: ViewerMode;
-}) {
-  if (family === "bell-nozzle") return <BellNozzleShape mode={mode} />;
-  if (family === "structural-bracket") return <StructuralBracketShape mode={mode} />;
-  if (family === "pressure-vessel") return <PressureVesselShape mode={mode} />;
-  if (family === "rover-arm") return <RoverArmShape mode={mode} />;
-  if (family === "grid-fin") return <GridFinShape mode={mode} />;
-
-  if (family === "nosecone") return <NoseconeShape mode={mode} />;
-  if (family === "shell") return <ShellShape mode={mode} />;
-
-  return <StructuralBracketShape mode={mode} />;
-}
-
-function StructuralBracketShape({ mode }: { mode: ViewerMode }) {
-  return (
-    <>
-      <div style={shapeStyles.bracketBackplate(mode)} />
-      <div style={shapeStyles.bracketTopFlange(mode)} />
-      <div style={shapeStyles.bracketBottomFlange(mode)} />
-      <div style={shapeStyles.bracketWebLeft(mode)} />
-      <div style={shapeStyles.bracketWebRight(mode)} />
-      <div style={shapeStyles.bracketBoltA(mode)} />
-      <div style={shapeStyles.bracketBoltB(mode)} />
-      <div style={shapeStyles.bracketBoltC(mode)} />
-      <div style={shapeStyles.bracketBoltD(mode)} />
-
-      {mode === "mesh" ? (
-        <>
-          <div style={shapeStyles.horizontalMesh(82)} />
-          <div style={shapeStyles.horizontalMesh(132)} />
-          <div style={shapeStyles.horizontalMesh(182)} />
-          <div style={shapeStyles.verticalMesh(72)} />
-          <div style={shapeStyles.verticalMesh(116)} />
-          <div style={shapeStyles.verticalMesh(160)} />
-        </>
-      ) : null}
-    </>
-  );
-}
-
-function BellNozzleShape({ mode }: { mode: ViewerMode }) {
-  return (
-    <>
-      <div style={shapeStyles.nozzleChamber(mode)} />
-      <div style={shapeStyles.nozzleThroat(mode)} />
-      <div style={shapeStyles.nozzleBell(mode)} />
-      <div style={shapeStyles.nozzleExitRing(mode)} />
-
-      {mode === "mesh" ? (
-        <>
-          <div style={shapeStyles.meshLine("50%", 58, 82)} />
-          <div style={shapeStyles.meshLine("50%", 112, 58)} />
-          <div style={shapeStyles.meshLine("50%", 172, 96)} />
-          <div style={shapeStyles.meshLine("50%", 238, 142)} />
-          <div style={shapeStyles.nozzleMeshA} />
-          <div style={shapeStyles.nozzleMeshB} />
-        </>
-      ) : null}
-    </>
-  );
-}
-
-function PressureVesselShape({ mode }: { mode: ViewerMode }) {
-  return (
-    <>
-      <div style={shapeStyles.vesselTop(mode)} />
-      <div style={shapeStyles.vesselBody(mode)} />
-      <div style={shapeStyles.vesselBottom(mode)} />
-      <div style={shapeStyles.vesselBandA(mode)} />
-      <div style={shapeStyles.vesselBandB(mode)} />
-      {mode === "mesh" ? (
-        <>
-          <div style={shapeStyles.meshLine("50%", 96, 116)} />
-          <div style={shapeStyles.meshLine("50%", 146, 128)} />
-          <div style={shapeStyles.meshLine("50%", 196, 116)} />
-        </>
-      ) : null}
-    </>
-  );
-}
-
-function NoseconeShape({ mode }: { mode: ViewerMode }) {
-  return (
-    <>
-      <div style={shapeStyles.tip(mode)} />
-      <div style={shapeStyles.body(mode)} />
-      <div style={shapeStyles.bandTop(mode)} />
-      <div style={shapeStyles.bandMid(mode)} />
-      <div style={shapeStyles.legacyNozzleHint(mode)} />
-      {mode === "mesh" ? (
-        <>
-          <div style={shapeStyles.meshLine("50%", 22, 96)} />
-          <div style={shapeStyles.meshLine("50%", 56, 98)} />
-          <div style={shapeStyles.meshLine("50%", 92, 110)} />
-          <div style={shapeStyles.meshLine("50%", 146, 110)} />
-          <div style={shapeStyles.meshLine("50%", 196, 110)} />
-          <div style={shapeStyles.meshLine("50%", 246, 110)} />
-        </>
-      ) : null}
-    </>
-  );
-}
-
-function ShellShape({ mode }: { mode: ViewerMode }) {
-  return (
-    <>
-      <div style={shapeStyles.shellOuter(mode)} />
-      <div style={shapeStyles.shellInner(mode)} />
-      <div style={shapeStyles.shellBraceLeft(mode)} />
-      <div style={shapeStyles.shellBraceRight(mode)} />
-      {mode === "mesh" ? (
-        <>
-          <div style={shapeStyles.horizontalMesh(70)} />
-          <div style={shapeStyles.horizontalMesh(120)} />
-          <div style={shapeStyles.horizontalMesh(170)} />
-          <div style={shapeStyles.horizontalMesh(220)} />
-          <div style={shapeStyles.verticalMesh(85)} />
-          <div style={shapeStyles.verticalMesh(135)} />
-        </>
-      ) : null}
-    </>
-  );
-}
-
-function RoverArmShape({ mode }: { mode: ViewerMode }) {
-  return (
-    <>
-      <div style={shapeStyles.armBase(mode)} />
-      <div style={shapeStyles.armLink(mode)} />
-      <div style={shapeStyles.armJointA(mode)} />
-      <div style={shapeStyles.armJointB(mode)} />
-      <div style={shapeStyles.armHead(mode)} />
-      {mode === "mesh" ? (
-        <>
-          <div style={shapeStyles.armMeshA} />
-          <div style={shapeStyles.armMeshB} />
-          <div style={shapeStyles.armMeshC} />
-        </>
-      ) : null}
-    </>
-  );
-}
-
-function GridFinShape({ mode }: { mode: ViewerMode }) {
-  return (
-    <>
-      <div style={shapeStyles.finFrame(mode)} />
-      <div style={shapeStyles.finGridA(mode)} />
-      <div style={shapeStyles.finGridB(mode)} />
-      <div style={shapeStyles.finGridC(mode)} />
-      <div style={shapeStyles.finGridD(mode)} />
-      {mode === "mesh" ? (
-        <>
-          <div style={shapeStyles.finDiagA} />
-          <div style={shapeStyles.finDiagB} />
-          <div style={shapeStyles.finDiagC} />
-          <div style={shapeStyles.finDiagD} />
-        </>
-      ) : null}
-    </>
   );
 }
 
@@ -386,25 +844,8 @@ function getSimulationLabel(family: VisualFamily) {
   return "PRINT STAND";
 }
 
-function getPartWrapperStyle(mode: ViewerMode, family: VisualFamily): CSSProperties {
-  const baseScale =
-    family === "bell-nozzle"
-      ? 1.05
-      : family === "structural-bracket"
-        ? 1.04
-        : 1;
-
-  const modeScale =
-    mode === "simulation"
-      ? baseScale + 0.02
-      : mode === "mesh"
-        ? baseScale + 0.01
-        : baseScale;
-
-  return {
-    ...styles.part,
-    transform: `translate(-50%, -50%) scale(${modeScale})`
-  };
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
 const gridBackground = `
@@ -413,10 +854,6 @@ const gridBackground = `
   linear-gradient(${theme.gridFine} 1px, transparent 1px),
   linear-gradient(90deg, ${theme.gridFine} 1px, transparent 1px)
 `;
-
-const basePartFill = "linear-gradient(180deg, #dededc 0%, #c8c8c6 48%, #b2b2b0 100%)";
-const meshFill = "linear-gradient(180deg, #f0f0ef 0%, #d3d3d1 35%, #ababaa 100%)";
-const darkMetal = "linear-gradient(180deg, #8a8a89 0%, #666665 100%)";
 
 const styles: Record<string, CSSProperties | ((status?: string) => CSSProperties)> = {
   viewport: {
@@ -461,12 +898,31 @@ const styles: Record<string, CSSProperties | ((status?: string) => CSSProperties
       "radial-gradient(circle at 50% 30%, rgba(255,255,255,0.5) 0%, rgba(255,255,255,0) 36%)",
     pointerEvents: "none"
   },
-  part: {
+  meshCanvasWrap: {
+    position: "absolute",
+    inset: "44px 0 36px 0",
+    zIndex: 2
+  },
+  meshCanvas: {
+    width: "100%",
+    height: "100%",
+    display: "block",
+    cursor: "grab",
+    touchAction: "none"
+  },
+  meshHint: {
     position: "absolute",
     left: "50%",
-    top: "49%",
-    width: 230,
-    height: 360
+    bottom: 18,
+    transform: "translateX(-50%)",
+    padding: "7px 10px",
+    background: "rgba(255,255,255,0.72)",
+    border: `1px solid ${theme.border}`,
+    fontSize: 10,
+    letterSpacing: "0.14em",
+    color: theme.muted,
+    textTransform: "uppercase",
+    pointerEvents: "none"
   },
   shadow: {
     position: "absolute",
@@ -478,7 +934,8 @@ const styles: Record<string, CSSProperties | ((status?: string) => CSSProperties
     borderRadius: "50%",
     background:
       "radial-gradient(ellipse at center, rgba(0,0,0,0.22) 0%, rgba(0,0,0,0.06) 54%, rgba(0,0,0,0) 78%)",
-    filter: "blur(2px)"
+    filter: "blur(2px)",
+    zIndex: 1
   },
   overlayTop: {
     position: "absolute",
@@ -731,451 +1188,3 @@ const styles: Record<string, CSSProperties | ((status?: string) => CSSProperties
     background: "rgba(85,116,129,0.18)"
   })
 };
-
-const shapeStyles = {
-  bracketBackplate: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 52,
-    transform: "translateX(-50%)",
-    width: 156,
-    height: 196,
-    borderRadius: 10,
-    background: mode === "mesh" ? meshFill : basePartFill,
-    border: "1px solid rgba(0,0,0,0.14)",
-    boxShadow: "0 12px 30px rgba(0,0,0,0.1)"
-  }),
-  bracketTopFlange: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 42,
-    transform: "translateX(-50%)",
-    width: 190,
-    height: 34,
-    borderRadius: 8,
-    background: mode === "mesh" ? "#d7d7d5" : "#c5c5c3",
-    border: "1px solid rgba(0,0,0,0.14)"
-  }),
-  bracketBottomFlange: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 228,
-    transform: "translateX(-50%)",
-    width: 190,
-    height: 34,
-    borderRadius: 8,
-    background: mode === "mesh" ? "#d7d7d5" : "#c5c5c3",
-    border: "1px solid rgba(0,0,0,0.14)"
-  }),
-  bracketWebLeft: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: 64,
-    top: 86,
-    width: 34,
-    height: 132,
-    transform: "skewX(-14deg)",
-    background: mode === "mesh" ? "#bdbdbb" : "#adadab",
-    border: "1px solid rgba(0,0,0,0.1)"
-  }),
-  bracketWebRight: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    right: 64,
-    top: 86,
-    width: 34,
-    height: 132,
-    transform: "skewX(14deg)",
-    background: mode === "mesh" ? "#bdbdbb" : "#adadab",
-    border: "1px solid rgba(0,0,0,0.1)"
-  }),
-  bracketBoltA: (mode: ViewerMode): CSSProperties => boltStyle(54, 50, mode),
-  bracketBoltB: (mode: ViewerMode): CSSProperties => boltStyle(156, 50, mode),
-  bracketBoltC: (mode: ViewerMode): CSSProperties => boltStyle(54, 236, mode),
-  bracketBoltD: (mode: ViewerMode): CSSProperties => boltStyle(156, 236, mode),
-
-  nozzleChamber: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 20,
-    transform: "translateX(-50%)",
-    width: 92,
-    height: 92,
-    borderRadius: "26px 26px 16px 16px",
-    background: mode === "mesh" ? meshFill : basePartFill,
-    border: "1px solid rgba(0,0,0,0.14)",
-    boxShadow: "0 12px 30px rgba(0,0,0,0.1)"
-  }),
-  nozzleThroat: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 104,
-    transform: "translateX(-50%)",
-    width: 48,
-    height: 44,
-    background: mode === "mesh" ? "#b8b8b6" : "#a8a8a6",
-    border: "1px solid rgba(0,0,0,0.14)"
-  }),
-  nozzleBell: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 138,
-    transform: "translateX(-50%)",
-    width: 170,
-    height: 150,
-    background: mode === "mesh" ? meshFill : basePartFill,
-    clipPath: "polygon(36% 0%, 64% 0%, 100% 100%, 0% 100%)",
-    border: "1px solid rgba(0,0,0,0.14)"
-  }),
-  nozzleExitRing: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 278,
-    transform: "translateX(-50%)",
-    width: 186,
-    height: 22,
-    borderRadius: 12,
-    background: mode === "mesh" ? "#b6b6b4" : "#9f9f9d",
-    border: "1px solid rgba(0,0,0,0.16)"
-  }),
-  vesselTop: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 36,
-    transform: "translateX(-50%)",
-    width: 126,
-    height: 62,
-    borderRadius: "70px 70px 18px 18px",
-    background: mode === "mesh" ? meshFill : basePartFill,
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  vesselBody: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 84,
-    transform: "translateX(-50%)",
-    width: 132,
-    height: 152,
-    background: mode === "mesh" ? meshFill : basePartFill,
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  vesselBottom: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 218,
-    transform: "translateX(-50%)",
-    width: 126,
-    height: 62,
-    borderRadius: "18px 18px 70px 70px",
-    background: mode === "mesh" ? meshFill : basePartFill,
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  vesselBandA: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 118,
-    transform: "translateX(-50%)",
-    width: 146,
-    height: 14,
-    background: mode === "mesh" ? "#bebebc" : "#b1b1af",
-    border: "1px solid rgba(0,0,0,0.14)"
-  }),
-  vesselBandB: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 190,
-    transform: "translateX(-50%)",
-    width: 146,
-    height: 14,
-    background: mode === "mesh" ? "#bebebc" : "#b1b1af",
-    border: "1px solid rgba(0,0,0,0.14)"
-  }),
-
-  tip: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 0,
-    transform: "translateX(-50%)",
-    width: 0,
-    height: 0,
-    borderLeft: "48px solid transparent",
-    borderRight: "48px solid transparent",
-    borderBottom: `92px solid ${mode === "mesh" ? "#dddddb" : "#d4d4d2"}`
-  }),
-  body: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 84,
-    transform: "translateX(-50%)",
-    width: 112,
-    height: 214,
-    background: mode === "mesh" ? meshFill : basePartFill,
-    border: "1px solid rgba(0,0,0,0.12)",
-    boxShadow: "0 12px 30px rgba(0,0,0,0.1)"
-  }),
-  bandTop: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 114,
-    transform: "translateX(-50%)",
-    width: 126,
-    height: 14,
-    background: mode === "mesh" ? "#bebebc" : "#b1b1af",
-    border: "1px solid rgba(0,0,0,0.14)"
-  }),
-  bandMid: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 236,
-    transform: "translateX(-50%)",
-    width: 126,
-    height: 18,
-    background: mode === "mesh" ? "#b5b5b3" : "#a8a8a6",
-    border: "1px solid rgba(0,0,0,0.14)"
-  }),
-  legacyNozzleHint: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    bottom: 16,
-    transform: "translateX(-50%)",
-    width: 74,
-    height: 42,
-    background: mode === "mesh" ? "linear-gradient(180deg, #8a8a89 0%, #737372 100%)" : darkMetal,
-    clipPath: "polygon(10% 0%, 90% 0%, 100% 100%, 0% 100%)"
-  }),
-  shellOuter: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 34,
-    transform: "translateX(-50%)",
-    width: 146,
-    height: 254,
-    background: mode === "mesh" ? meshFill : basePartFill,
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  shellInner: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 56,
-    transform: "translateX(-50%)",
-    width: 102,
-    height: 210,
-    background: mode === "mesh" ? "rgba(242,242,240,0.84)" : "rgba(255,255,255,0.45)",
-    border: "1px solid rgba(0,0,0,0.08)"
-  }),
-  shellBraceLeft: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: 54,
-    top: 120,
-    width: 26,
-    height: 82,
-    background: mode === "mesh" ? "#b6b6b4" : "#aaaaa8"
-  }),
-  shellBraceRight: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    right: 54,
-    top: 120,
-    width: 26,
-    height: 82,
-    background: mode === "mesh" ? "#b6b6b4" : "#aaaaa8"
-  }),
-  armBase: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: 42,
-    bottom: 46,
-    width: 58,
-    height: 58,
-    borderRadius: "50%",
-    background: mode === "mesh" ? "#d8d8d6" : "#c8c8c6",
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  armLink: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: 86,
-    top: 164,
-    width: 106,
-    height: 24,
-    background: mode === "mesh" ? meshFill : basePartFill,
-    transform: "rotate(-28deg)",
-    transformOrigin: "left center",
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  armJointA: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: 88,
-    top: 176,
-    width: 24,
-    height: 24,
-    borderRadius: "50%",
-    background: mode === "mesh" ? "#c8c8c6" : "#b8b8b6",
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  armJointB: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    right: 66,
-    top: 116,
-    width: 28,
-    height: 28,
-    borderRadius: "50%",
-    background: mode === "mesh" ? "#c8c8c6" : "#b8b8b6",
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  armHead: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    right: 34,
-    top: 82,
-    width: 72,
-    height: 42,
-    background: mode === "mesh" ? meshFill : basePartFill,
-    border: "1px solid rgba(0,0,0,0.12)"
-  }),
-  finFrame: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 58,
-    transform: "translateX(-50%)",
-    width: 146,
-    height: 146,
-    background: mode === "mesh" ? meshFill : "linear-gradient(180deg, #d3d3d1 0%, #b7b7b5 100%)",
-    border: "10px solid rgba(0,0,0,0.18)"
-  }),
-  finGridA: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 102,
-    transform: "translateX(-50%)",
-    width: 126,
-    borderTop: `10px solid ${mode === "mesh" ? "#9d9d9b" : "#8f8f8d"}`
-  }),
-  finGridB: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top: 136,
-    transform: "translateX(-50%)",
-    width: 126,
-    borderTop: `10px solid ${mode === "mesh" ? "#9d9d9b" : "#8f8f8d"}`
-  }),
-  finGridC: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    left: 72,
-    top: 68,
-    width: 10,
-    height: 126,
-    background: mode === "mesh" ? "#9d9d9b" : "#8f8f8d"
-  }),
-  finGridD: (mode: ViewerMode): CSSProperties => ({
-    position: "absolute",
-    right: 72,
-    top: 68,
-    width: 10,
-    height: 126,
-    background: mode === "mesh" ? "#9d9d9b" : "#8f8f8d"
-  }),
-  meshLine: (left: string, top: number, width: number): CSSProperties => ({
-    position: "absolute",
-    left,
-    top,
-    width,
-    borderTop: "1px solid rgba(0,0,0,0.18)",
-    transform: "translateX(-50%)"
-  }),
-  horizontalMesh: (top: number): CSSProperties => ({
-    position: "absolute",
-    left: "50%",
-    top,
-    width: 146,
-    borderTop: "1px solid rgba(0,0,0,0.18)",
-    transform: "translateX(-50%)"
-  }),
-  verticalMesh: (left: number): CSSProperties => ({
-    position: "absolute",
-    left,
-    top: 34,
-    width: 1,
-    height: 254,
-    background: "rgba(0,0,0,0.16)"
-  }),
-  nozzleMeshA: {
-    position: "absolute",
-    left: 60,
-    top: 150,
-    width: 132,
-    borderTop: "1px solid rgba(0,0,0,0.16)",
-    transform: "rotate(72deg)"
-  } as CSSProperties,
-  nozzleMeshB: {
-    position: "absolute",
-    left: 38,
-    top: 150,
-    width: 132,
-    borderTop: "1px solid rgba(0,0,0,0.16)",
-    transform: "rotate(-72deg)"
-  } as CSSProperties,
-  armMeshA: {
-    position: "absolute",
-    left: 96,
-    top: 150,
-    width: 86,
-    borderTop: "1px solid rgba(0,0,0,0.18)",
-    transform: "rotate(-28deg)"
-  } as CSSProperties,
-  armMeshB: {
-    position: "absolute",
-    left: 108,
-    top: 170,
-    width: 66,
-    borderTop: "1px solid rgba(0,0,0,0.18)",
-    transform: "rotate(-28deg)"
-  } as CSSProperties,
-  armMeshC: {
-    position: "absolute",
-    right: 44,
-    top: 102,
-    width: 54,
-    borderTop: "1px solid rgba(0,0,0,0.18)"
-  } as CSSProperties,
-  finDiagA: {
-    position: "absolute",
-    left: 56,
-    top: 74,
-    width: 140,
-    borderTop: "1px solid rgba(0,0,0,0.16)",
-    transform: "rotate(45deg)"
-  } as CSSProperties,
-  finDiagB: {
-    position: "absolute",
-    left: 52,
-    top: 150,
-    width: 140,
-    borderTop: "1px solid rgba(0,0,0,0.16)",
-    transform: "rotate(-45deg)"
-  } as CSSProperties,
-  finDiagC: {
-    position: "absolute",
-    left: 74,
-    top: 64,
-    width: 120,
-    borderTop: "1px solid rgba(0,0,0,0.16)",
-    transform: "rotate(45deg)"
-  } as CSSProperties,
-  finDiagD: {
-    position: "absolute",
-    left: 58,
-    top: 140,
-    width: 120,
-    borderTop: "1px solid rgba(0,0,0,0.16)",
-    transform: "rotate(-45deg)"
-  } as CSSProperties
-};
-
-function boltStyle(left: number, top: number, mode: ViewerMode): CSSProperties {
-  return {
-    position: "absolute",
-    left,
-    top,
-    width: 20,
-    height: 20,
-    borderRadius: "50%",
-    background: mode === "mesh" ? "#eeeeec" : "#f6f6f4",
-    border: "3px solid rgba(0,0,0,0.18)",
-    boxSizing: "border-box"
-  };
-}
