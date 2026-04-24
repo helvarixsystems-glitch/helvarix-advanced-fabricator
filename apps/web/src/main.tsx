@@ -43,6 +43,16 @@ const VIEW_MODE_OPTIONS: Array<{ label: string; value: ViewerMode }> = [
   { label: "Simulation", value: "simulation" }
 ];
 
+type RightPanelTab = "summary" | "simulation" | "validation" | "export" | "history";
+
+const RIGHT_PANEL_TABS: Array<{ label: string; value: RightPanelTab }> = [
+  { label: "Summary", value: "summary" },
+  { label: "Simulation", value: "simulation" },
+  { label: "Validation", value: "validation" },
+  { label: "Export", value: "export" },
+  { label: "History", value: "history" }
+];
+
 function App() {
   const [credits, setCredits] = React.useState<CreditBalance>({
     available: 184,
@@ -64,6 +74,7 @@ function App() {
   const [exportFormat, setExportFormat] =
     React.useState<(typeof EXPORT_OPTIONS)[number]["value"]>("stl");
   const [viewerMode, setViewerMode] = React.useState<ViewerMode>("concept");
+  const [rightPanelTab, setRightPanelTab] = React.useState<RightPanelTab>("summary");
 
   const [form, setForm] = React.useState<GenerationInput>({
     componentFamily: "nosecone",
@@ -501,7 +512,11 @@ function App() {
                   className={`viewer-mode-button ${
                     viewerMode === option.value ? "viewer-mode-button-active" : ""
                   }`}
-                  onClick={() => setViewerMode(option.value)}
+                  onClick={() => {
+                    setViewerMode(option.value);
+                    if (option.value === "simulation") setRightPanelTab("simulation");
+                    if (option.value === "concept") setRightPanelTab("summary");
+                  }}
                 >
                   {option.label}
                 </button>
@@ -526,135 +541,16 @@ function App() {
 
           <WorkspacePanel
             title="Results"
-            subtitle="Validation, lineage, and additive export status."
-          >
-            <SidebarSection title="Selected Run">
-              <MetricRow label="Revision" value={displayGeneration?.result?.revision ?? "—"} />
-              <MetricRow label="Status" value={displayGeneration?.status ?? "—"} />
-              <MetricRow
-                label="Export State"
-                value={displayGeneration?.result?.exportState ?? "—"}
-              />
-              <MetricRow
-                label="Token Cost"
-                value={displayGeneration ? String(displayGeneration.tokenCost) : "—"}
-              />
-              <MetricRow
-                label="Estimated Mass"
-                value={
-                  displayGeneration?.result?.estimatedMassKg !== undefined
-                    ? `${displayGeneration.result.estimatedMassKg} kg`
-                    : "—"
-                }
-              />
-              <MetricRow
-                label="Parent Run"
-                value={displayGeneration?.parentGenerationId ?? "Root Concept"}
-              />
-            </SidebarSection>
-
-            <SimulationPanel apiBase={API_BASE} input={form} />
-
-            <SidebarSection title="Validation">
-              {validationMessages.length ? (
-                validationMessages.map((message, index) => (
-                  <div key={index} className={`message message-${message.severity}`}>
-                    <div className="message-title">{message.title}</div>
-                    <div className="message-body">{message.text}</div>
-                  </div>
-                ))
-              ) : (
-                <div className="message">
-                  <div className="message-title">Awaiting Generation</div>
-                  <div className="message-body">
-                    Submit a concept run to generate printable geometry and validation output.
-                  </div>
-                </div>
-              )}
-            </SidebarSection>
-
-            <SidebarSection title="Export">
-              <SelectField
-                label="Export Format"
-                defaultValue={exportFormat}
-                options={EXPORT_OPTIONS.map((item) => ({
-                  label: item.label,
-                  value: item.value
-                }))}
-                onChange={(value) => setExportFormat(value as "stl" | "step" | "json")}
-              />
-              <MetricRow
-                label="Export Readiness"
-                value={displayGeneration?.status === "completed" ? "Ready To Queue" : "Generation Required"}
-              />
-            </SidebarSection>
-
-            <SidebarSection title="Generation History">
-              {generations.length ? (
-                <div className="history-list">
-                  {generations.map((generation) => {
-                    const isActive = generation.id === displayGeneration?.id;
-
-                    return (
-                      <button
-                        key={generation.id}
-                        type="button"
-                        className={`history-item ${isActive ? "history-item-active" : ""}`}
-                        onClick={() => {
-                          setSelectedGenerationId(generation.id);
-                          syncFormFromGeneration(generation);
-                        }}
-                      >
-                        <div className="history-item-top">
-                          <span className="history-item-name">
-                            {generation.componentName}
-                          </span>
-                          <span
-                            className={`history-chip history-chip-${statusTone(
-                              generation.status
-                            )}`}
-                          >
-                            {generation.status}
-                          </span>
-                        </div>
-
-                        <div className="history-item-meta">
-                          <span>{generation.id}</span>
-                          <span>{formatTimestamp(generation.updatedAt)}</span>
-                        </div>
-
-                        <div className="history-item-meta">
-                          <span>{generation.input.componentFamily}</span>
-                          <span>{generation.tokenCost} credits</span>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="message">
-                  <div className="message-title">No Runs</div>
-                  <div className="message-body">
-                    This project does not have any generation history yet.
-                  </div>
-                </div>
-              )}
-            </SidebarSection>
-
-            <SidebarSection title="Actions">
-              <div className="actions">
+            subtitle="Tabbed validation, lineage, simulation, and export status."
+            footer={
+              viewerMode === "concept" ? (
                 <BlackButton
-                  subdued
-                  onClick={handleQueueExport}
-                  disabled={
-                    !displayGeneration ||
-                    displayGeneration.status !== "completed" ||
-                    submittingExport
-                  }
+                  onClick={handleGenerateConcept}
+                  disabled={submittingGeneration || loadingWorkspace}
                 >
-                  {submittingExport ? "Queueing Export..." : "Queue Export"}
+                  {submittingGeneration ? "Submitting..." : "Generate"}
                 </BlackButton>
-
+              ) : viewerMode === "simulation" ? null : (
                 <BlackButton
                   subdued
                   onClick={handleCreateIteration}
@@ -662,8 +558,198 @@ function App() {
                 >
                   {submittingIteration ? "Creating Iteration..." : "Create Iteration"}
                 </BlackButton>
-              </div>
-            </SidebarSection>
+              )
+            }
+          >
+            <div className="right-panel-tabs" role="tablist" aria-label="Results panel tabs">
+              {RIGHT_PANEL_TABS.map((tab) => (
+                <button
+                  key={tab.value}
+                  type="button"
+                  className={`right-panel-tab ${
+                    rightPanelTab === tab.value ? "right-panel-tab-active" : ""
+                  }`}
+                  onClick={() => setRightPanelTab(tab.value)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="right-panel-body">
+              {rightPanelTab === "summary" ? (
+                <>
+                  <SidebarSection title="Selected Run">
+                    <MetricRow label="Revision" value={displayGeneration?.result?.revision ?? "—"} />
+                    <MetricRow label="Status" value={displayGeneration?.status ?? "—"} />
+                    <MetricRow
+                      label="Export State"
+                      value={displayGeneration?.result?.exportState ?? "—"}
+                    />
+                    <MetricRow
+                      label="Token Cost"
+                      value={displayGeneration ? String(displayGeneration.tokenCost) : "—"}
+                    />
+                    <MetricRow
+                      label="Estimated Mass"
+                      value={
+                        displayGeneration?.result?.estimatedMassKg !== undefined
+                          ? `${displayGeneration.result.estimatedMassKg} kg`
+                          : "—"
+                      }
+                    />
+                    <MetricRow
+                      label="Parent Run"
+                      value={displayGeneration?.parentGenerationId ?? "Root Concept"}
+                    />
+                  </SidebarSection>
+
+                  <SidebarSection title="Readiness">
+                    <div className="compact-score-card">
+                      <span>Current Phase</span>
+                      <strong>{viewerMode.toUpperCase()}</strong>
+                    </div>
+                    <div className="message message-success">
+                      <div className="message-title">Workflow Alignment</div>
+                      <div className="message-body">
+                        Generate constraint-filtered geometry, review manufacturability, then run
+                        simulation validation before export.
+                      </div>
+                    </div>
+                  </SidebarSection>
+                </>
+              ) : null}
+
+              {rightPanelTab === "simulation" ? (
+                <SimulationPanel
+                  apiBase={API_BASE}
+                  input={form}
+                  showRunButton={viewerMode === "simulation"}
+                />
+              ) : null}
+
+              {rightPanelTab === "validation" ? (
+                <SidebarSection title="Validation">
+                  {validationMessages.length ? (
+                    validationMessages.map((message, index) => (
+                      <div key={index} className={`message message-${message.severity}`}>
+                        <div className="message-title">{message.title}</div>
+                        <div className="message-body">{message.text}</div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="message">
+                      <div className="message-title">Awaiting Generation</div>
+                      <div className="message-body">
+                        Submit a concept run to generate printable geometry and validation output.
+                      </div>
+                    </div>
+                  )}
+                </SidebarSection>
+              ) : null}
+
+              {rightPanelTab === "export" ? (
+                <>
+                  <SidebarSection title="Export">
+                    <SelectField
+                      label="Export Format"
+                      defaultValue={exportFormat}
+                      options={EXPORT_OPTIONS.map((item) => ({
+                        label: item.label,
+                        value: item.value
+                      }))}
+                      onChange={(value) => setExportFormat(value as "stl" | "step" | "json")}
+                    />
+                    <MetricRow
+                      label="Export Readiness"
+                      value={
+                        displayGeneration?.status === "completed"
+                          ? "Ready To Queue"
+                          : "Generation Required"
+                      }
+                    />
+                  </SidebarSection>
+
+                  <SidebarSection title="Actions">
+                    <div className="actions">
+                      <BlackButton
+                        subdued
+                        onClick={handleQueueExport}
+                        disabled={
+                          !displayGeneration ||
+                          displayGeneration.status !== "completed" ||
+                          submittingExport
+                        }
+                      >
+                        {submittingExport ? "Queueing Export..." : "Queue Export"}
+                      </BlackButton>
+
+                      <BlackButton
+                        subdued
+                        onClick={handleCreateIteration}
+                        disabled={!displayGeneration || submittingIteration}
+                      >
+                        {submittingIteration ? "Creating Iteration..." : "Create Iteration"}
+                      </BlackButton>
+                    </div>
+                  </SidebarSection>
+                </>
+              ) : null}
+
+              {rightPanelTab === "history" ? (
+                <SidebarSection title="Generation History">
+                  {generations.length ? (
+                    <div className="history-list">
+                      {generations.map((generation) => {
+                        const isActive = generation.id === displayGeneration?.id;
+
+                        return (
+                          <button
+                            key={generation.id}
+                            type="button"
+                            className={`history-item ${isActive ? "history-item-active" : ""}`}
+                            onClick={() => {
+                              setSelectedGenerationId(generation.id);
+                              syncFormFromGeneration(generation);
+                            }}
+                          >
+                            <div className="history-item-top">
+                              <span className="history-item-name">
+                                {generation.componentName}
+                              </span>
+                              <span
+                                className={`history-chip history-chip-${statusTone(
+                                  generation.status
+                                )}`}
+                              >
+                                {generation.status}
+                              </span>
+                            </div>
+
+                            <div className="history-item-meta">
+                              <span>{generation.id}</span>
+                              <span>{formatTimestamp(generation.updatedAt)}</span>
+                            </div>
+
+                            <div className="history-item-meta">
+                              <span>{generation.input.componentFamily}</span>
+                              <span>{generation.tokenCost} credits</span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="message">
+                      <div className="message-title">No Runs</div>
+                      <div className="message-body">
+                        This project does not have any generation history yet.
+                      </div>
+                    </div>
+                  )}
+                </SidebarSection>
+              ) : null}
+            </div>
           </WorkspacePanel>
         </main>
       </div>
