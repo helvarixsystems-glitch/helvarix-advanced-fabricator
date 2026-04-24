@@ -1,230 +1,203 @@
 import React from "react";
-import { BlackButton, MetricRow, SidebarSection } from "@haf/ui";
+import { MetricRow, SidebarSection } from "@haf/ui";
 import {
   getSimulation,
   runSimulation,
   type SimulationRecord
 } from "../../lib/simulationClient";
 
+export type SimulationPanelHandle = {
+  run: () => Promise<void>;
+};
+
 type SimulationPanelProps = {
   apiBase: string;
   input: unknown;
-  showRunButton?: boolean;
+  onSimulationChange?: (simulation: SimulationRecord | null) => void;
 };
 
-export function SimulationPanel({
-  apiBase,
-  input,
-  showRunButton = true
-}: SimulationPanelProps) {
-  const [simulationId, setSimulationId] = React.useState<string | null>(null);
-  const [simulation, setSimulation] = React.useState<SimulationRecord | null>(null);
-  const [submitting, setSubmitting] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
+export const SimulationPanel = React.forwardRef<SimulationPanelHandle, SimulationPanelProps>(
+  function SimulationPanel({ apiBase, input, onSimulationChange }, ref) {
+    const [simulationId, setSimulationId] = React.useState<string | null>(null);
+    const [simulation, setSimulation] = React.useState<SimulationRecord | null>(null);
+    const [submitting, setSubmitting] = React.useState(false);
+    const [error, setError] = React.useState<string | null>(null);
 
-  const isRunning =
-    simulation?.status === "queued" || simulation?.status === "running";
+    const isRunning = simulation?.status === "queued" || simulation?.status === "running";
+    const result = simulation?.result;
 
-  React.useEffect(() => {
-    if (!simulationId) return;
-
-    const timer = window.setInterval(async () => {
-      try {
-        const next = await getSimulation(apiBase, simulationId);
+    const setCurrentSimulation = React.useCallback(
+      (next: SimulationRecord | null) => {
         setSimulation(next);
+        onSimulationChange?.(next);
+      },
+      [onSimulationChange]
+    );
 
-        if (next?.status === "completed" || next?.status === "failed") {
-          window.clearInterval(timer);
+    React.useEffect(() => {
+      if (!simulationId) return;
+
+      const timer = window.setInterval(async () => {
+        try {
+          const next = await getSimulation(apiBase, simulationId);
+          setCurrentSimulation(next);
+
+          if (next?.status === "completed" || next?.status === "failed") {
+            window.clearInterval(timer);
+          }
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Unable to fetch simulation.");
         }
+      }, 2000);
+
+      return () => window.clearInterval(timer);
+    }, [apiBase, simulationId, setCurrentSimulation]);
+
+    const handleRunSimulation = React.useCallback(async () => {
+      if (submitting || isRunning) return;
+
+      setSubmitting(true);
+      setError(null);
+
+      try {
+        const response = await runSimulation(apiBase, input);
+        setSimulationId(response.id);
+
+        const firstResult = await getSimulation(apiBase, response.id);
+        setCurrentSimulation(firstResult);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Unable to fetch simulation.");
+        setError(err instanceof Error ? err.message : "Simulation failed.");
+      } finally {
+        setSubmitting(false);
       }
-    }, 2000);
+    }, [apiBase, input, isRunning, setCurrentSimulation, submitting]);
 
-    return () => window.clearInterval(timer);
-  }, [apiBase, simulationId]);
+    React.useImperativeHandle(ref, () => ({ run: handleRunSimulation }), [
+      handleRunSimulation
+    ]);
 
-  async function handleRunSimulation() {
-    setSubmitting(true);
-    setError(null);
-
-    try {
-      const response = await runSimulation(apiBase, input);
-      setSimulationId(response.id);
-
-      const firstResult = await getSimulation(apiBase, response.id);
-      setSimulation(firstResult);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Simulation failed.");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  const result = simulation?.result;
-
-  return (
-    <SidebarSection title="Simulation Engine">
-      <div className="simulation-card">
-        <div className="simulation-card-header">
-          <div>
-            <div className="message-title">Validation Pipeline</div>
-            <div className="simulation-subtitle">
-              Structural, thermal, manufacturability, CFD, and mass scoring.
-            </div>
-          </div>
-
-          <span className={`history-chip history-chip-${statusTone(simulation?.status)}`}>
-            {simulation?.status ?? "idle"}
-          </span>
-        </div>
-
-        {showRunButton ? (
-          <BlackButton
-            subdued
-            onClick={handleRunSimulation}
-            disabled={submitting || isRunning}
-          >
-            {submitting || isRunning ? "Running Simulation..." : "Run Simulation"}
-          </BlackButton>
-        ) : (
-          <div className="message">
-            <div className="message-title">Simulation Locked To Viewer Mode</div>
-            <div className="message-body">
-              Select the Simulation tab above the geometry window to run validation.
-            </div>
-          </div>
-        )}
-
-        {simulation ? (
-          <div className="simulation-metrics">
-            <MetricRow label="Simulation ID" value={simulation.id} />
-            <MetricRow
-              label="Remote Job"
-              value={simulation.remoteJobId ?? "Internal / Pending Render"}
-            />
-            <MetricRow
-              label="Updated"
-              value={new Date(simulation.updatedAt).toLocaleString()}
-            />
-          </div>
-        ) : (
-          <div className="message">
-            <div className="message-title">Ready</div>
-            <div className="message-body">
-              Generate a concept, then run simulation validation on the selected design.
-            </div>
-          </div>
-        )}
-
-        {result ? (
-          <>
-            <div className="simulation-score">
-              <span>Total Score</span>
-              <strong>{result.score.total}/100</strong>
+    return (
+      <SidebarSection title="Simulation Engine">
+        <div className="simulation-card">
+          <div className="simulation-card-header">
+            <div>
+              <div className="message-title">Validation Pipeline</div>
+              <div className="simulation-subtitle">
+                Structural, thermal, manufacturability, CFD, and mass scoring.
+              </div>
             </div>
 
-            <div className="simulation-score-grid">
-              <MetricRow label="Structural" value={`${result.score.structural}/100`} />
-              <MetricRow label="Thermal" value={`${result.score.thermal}/100`} />
+            <span className={`history-chip history-chip-${statusTone(simulation?.status)}`}>
+              {submitting || isRunning ? "running" : simulation?.status ?? "idle"}
+            </span>
+          </div>
+
+          {simulation ? (
+            <div className="simulation-metrics">
+              <MetricRow label="Simulation ID" value={simulation.id} />
               <MetricRow
-                label="Manufacturing"
-                value={`${result.score.manufacturability}/100`}
+                label="Remote Job"
+                value={simulation.remoteJobId ?? "Internal / Pending Render"}
               />
-              <MetricRow label="CFD" value={`${result.score.cfd}/100`} />
-              <MetricRow label="Mass" value={`${result.score.mass}/100`} />
+              <MetricRow label="Updated" value={new Date(simulation.updatedAt).toLocaleString()} />
             </div>
-
-            <div className="message message-success">
-              <div className="message-title">Simulation Summary</div>
-              <div className="message-body">{result.summary}</div>
+          ) : (
+            <div className="message">
+              <div className="message-title">Ready</div>
+              <div className="message-body">
+                Use the Run Simulation action below to validate the selected/generated design.
+              </div>
             </div>
+          )}
 
-            {result.structural ? (
-              <div className="simulation-metrics">
-                <MetricRow
-                  label="Safety Factor"
-                  value={formatNumber(result.structural.estimatedSafetyFactor)}
-                />
-                <MetricRow
-                  label="Max Stress"
-                  value={`${formatScientific(result.structural.maxVonMisesStressPa)} Pa`}
-                />
-                <MetricRow
-                  label="Displacement"
-                  value={`${result.structural.maxDisplacementMm.toFixed(4)} mm`}
-                />
-                <MetricRow label="Solver" value={result.structural.solver} />
+          {result ? (
+            <>
+              <div className="simulation-score">
+                <span>Total Score</span>
+                <strong>{result.score.total}/100</strong>
               </div>
-            ) : null}
 
-            {result.thermal ? (
-              <div className="simulation-metrics">
-                <MetricRow
-                  label="Thermal Distortion"
-                  value={`${result.thermal.estimatedDistortionMm.toFixed(4)} mm`}
-                />
-                <MetricRow label="Thermal Solver" value={result.thermal.solver} />
+              <div className="simulation-score-grid">
+                <MetricRow label="Structural" value={`${result.score.structural}/100`} />
+                <MetricRow label="Thermal" value={`${result.score.thermal}/100`} />
+                <MetricRow label="Manufacturing" value={`${result.score.manufacturability}/100`} />
+                <MetricRow label="CFD" value={`${result.score.cfd}/100`} />
+                <MetricRow label="Mass" value={`${result.score.mass}/100`} />
               </div>
-            ) : null}
 
-            {result.manufacturability ? (
-              <div className="simulation-metrics">
-                <MetricRow
-                  label="Manufacturability"
-                  value={`${result.manufacturability.manufacturabilityScore.toFixed(2)}/100`}
-                />
-                <MetricRow
-                  label="Support Required"
-                  value={result.manufacturability.supportRequired ? "Yes" : "No"}
-                />
+              <div className="message message-success">
+                <div className="message-title">Simulation Summary</div>
+                <div className="message-body">{result.summary}</div>
               </div>
-            ) : null}
 
-            {result.cfd ? (
-              <div className="simulation-metrics">
-                <MetricRow
-                  label="Estimated Drag"
-                  value={`${result.cfd.estimatedDragN.toFixed(3)} N`}
-                />
-                <MetricRow
-                  label="Estimated Lift"
-                  value={`${result.cfd.estimatedLiftN.toFixed(3)} N`}
-                />
-                <MetricRow label="CFD Solver" value={result.cfd.solver} />
-              </div>
-            ) : null}
-
-            {result.warnings.length ? (
-              <div className="message message-warning">
-                <div className="message-title">Warnings</div>
-                <div className="message-body">
-                  {result.warnings.slice(0, 3).join(" ")}
+              {result.structural ? (
+                <div className="simulation-metrics">
+                  <MetricRow
+                    label="Safety Factor"
+                    value={formatNumber(result.structural.estimatedSafetyFactor)}
+                  />
+                  <MetricRow
+                    label="Max Stress"
+                    value={`${formatScientific(result.structural.maxVonMisesStressPa)} Pa`}
+                  />
+                  <MetricRow
+                    label="Displacement"
+                    value={`${result.structural.maxDisplacementMm.toFixed(4)} mm`}
+                  />
+                  <MetricRow label="Solver" value={result.structural.solver} />
                 </div>
-              </div>
-            ) : null}
+              ) : null}
 
-            {result.errors.length ? (
-              <div className="message message-error">
-                <div className="message-title">Errors</div>
-                <div className="message-body">
-                  {result.errors.slice(0, 3).join(" ")}
+              {result.thermal ? (
+                <div className="simulation-metrics">
+                  <MetricRow
+                    label="Thermal Distortion"
+                    value={`${result.thermal.estimatedDistortionMm.toFixed(4)} mm`}
+                  />
+                  <MetricRow label="Thermal Solver" value={result.thermal.solver} />
                 </div>
-              </div>
-            ) : null}
-          </>
-        ) : null}
+              ) : null}
 
-        {error ? (
-          <div className="message message-error">
-            <div className="message-title">Simulation Error</div>
-            <div className="message-body">{error}</div>
-          </div>
-        ) : null}
-      </div>
-    </SidebarSection>
-  );
-}
+              {result.manufacturability ? (
+                <div className="simulation-metrics">
+                  <MetricRow
+                    label="Manufacturability"
+                    value={`${result.manufacturability.manufacturabilityScore.toFixed(2)}/100`}
+                  />
+                  <MetricRow
+                    label="Support Required"
+                    value={result.manufacturability.supportRequired ? "Yes" : "No"}
+                  />
+                </div>
+              ) : null}
+
+              {result.cfd ? (
+                <div className="simulation-metrics">
+                  <MetricRow
+                    label="Estimated Drag"
+                    value={`${result.cfd.estimatedDragN.toFixed(3)} N`}
+                  />
+                  <MetricRow
+                    label="Estimated Lift"
+                    value={`${result.cfd.estimatedLiftN.toFixed(3)} N`}
+                  />
+                  <MetricRow label="CFD Solver" value={result.cfd.solver} />
+                </div>
+              ) : null}
+            </>
+          ) : null}
+
+          {error ? (
+            <div className="message message-error">
+              <div className="message-title">Simulation Error</div>
+              <div className="message-body">{error}</div>
+            </div>
+          ) : null}
+        </div>
+      </SidebarSection>
+    );
+  }
+);
 
 function statusTone(status?: string) {
   if (status === "completed") return "success";
