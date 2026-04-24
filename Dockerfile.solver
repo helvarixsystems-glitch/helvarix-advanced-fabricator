@@ -1,0 +1,29 @@
+FROM node:20-bookworm
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    gmsh \
+    calculix-ccx \
+    python3 \
+    python3-pip \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY package*.json ./
+COPY services ./services
+COPY packages ./packages
+COPY tsconfig*.json ./
+
+RUN npm install
+
+ENV NODE_ENV=production
+ENV HELVARIX_SOLVER_WORKSPACE_ROOT=/tmp/helvarix-solver
+ENV HELVARIX_ENABLE_NATIVE_SOLVERS=true
+ENV HELVARIX_GMSH_EXECUTABLE=gmsh
+ENV HELVARIX_CALCULIX_EXECUTABLE=ccx
+
+EXPOSE 8787
+
+CMD ["npm", "run", "solver:worker"]
