@@ -1,99 +1,99 @@
-export const appName = "Helvarix Advanced Fabricator";
+// ==============================
+// SHARED CORE TYPES
+// ==============================
 
-export const theme = {
-  bg: "#e9e9e7",
-  panel: "rgba(249,249,247,0.9)",
-  border: "rgba(0,0,0,0.12)",
-  text: "#111111",
-  muted: "rgba(0,0,0,0.58)",
-  black: "#111111",
-  white: "#ffffff",
-  grid: "rgba(0,0,0,0.08)",
-  gridFine: "rgba(0,0,0,0.04)"
+export type ComponentFamily =
+  | "structural-bracket"
+  | "nosecone"
+  | "shell"
+  | "rover-arm"
+  | "grid-fin";
+
+// ==============================
+// REQUIREMENTS-FIRST INPUT MODEL
+// ==============================
+
+export type StructuralBracketRequirements = {
+  // What the part must do
+  loadCase: {
+    forceN: number;              // required load support
+    direction: "vertical" | "lateral" | "multi-axis";
+    vibrationHz?: number;        // optional vibration requirement
+  };
+
+  // How safe it must be
+  safetyFactor: number;
+
+  // Mounting constraints
+  mounting: {
+    boltCount: number;
+    boltDiameterMm: number;
+    spacingMm: number;
+  };
+
+  // Envelope constraints
+  envelope: {
+    maxWidthMm: number;
+    maxHeightMm: number;
+    maxDepthMm: number;
+  };
+
+  // Manufacturing constraints
+  manufacturing: {
+    process: "additive" | "machined";
+    minWallThicknessMm: number;
+    maxOverhangDeg: number;
+    supportAllowed: boolean;
+  };
+
+  // Optimization targets
+  objectives: {
+    targetMassKg?: number;
+    priority: "lightweight" | "stiffness" | "balanced";
+  };
 };
 
-export type ComponentFamily = "nosecone" | "shell" | "rover-arm" | "grid-fin";
-export type GenerationStatus = "queued" | "running" | "completed" | "failed";
-export type ExportStatus = "idle" | "queued" | "processing" | "ready" | "failed";
-export type ValidationSeverity = "success" | "warning" | "error";
-
-export type CreditBalance = {
-  available: number;
-  reserved: number;
-};
-
-export type ValidationMessage = {
-  severity: ValidationSeverity;
-  title: string;
-  text: string;
-};
-
-export type GeometryPreview = {
-  silhouette: ComponentFamily;
-  lengthMm: number;
-  widthMm: number;
-  wallThicknessMm: number;
-  material: string;
-  notes?: string[];
-};
+// ==============================
+// GENERATION INPUT
+// ==============================
 
 export type GenerationInput = {
   componentFamily: ComponentFamily;
-  componentName: string;
-  lengthMm: number;
-  baseDiameterMm: number;
+  requirements: StructuralBracketRequirements;
+};
+
+// ==============================
+// DERIVED OUTPUT
+// ==============================
+
+export type DerivedGeometry = {
+  widthMm: number;
+  heightMm: number;
+  depthMm: number;
   wallThicknessMm: number;
   material: string;
-  targetMassKg: number;
+  estimatedMassKg: number;
 };
+
+// ==============================
+// GENERATION RESULT
+// ==============================
 
 export type GenerationResult = {
-  revision: string;
-  exportState: ExportStatus;
-  estimatedMassKg: number;
-  estimatedBurn: number;
-  geometry: GeometryPreview;
-  validations: ValidationMessage[];
+  geometryId: string;
+  derived: DerivedGeometry;
+  candidatesEvaluated: number;
+  rejected: number;
 };
 
-export type ProjectSummary = {
-  id: string;
-  name: string;
-  componentFamily: ComponentFamily;
-  workspaceLabel: string;
-  createdAt: string;
-  updatedAt: string;
-};
+// ==============================
+// VIEWER PREVIEW TYPE
+// ==============================
 
-export type GenerationSummary = {
-  id: string;
-  projectId: string;
-  parentGenerationId?: string | null;
-  componentName: string;
-  status: GenerationStatus;
-  tokenCost: number;
-  updatedAt: string;
-  createdAt: string;
-  input: GenerationInput;
-  result?: GenerationResult;
+export type GeometryPreview = {
+  silhouette?: ComponentFamily;
+  material: string;
+  lengthMm: number;
+  wallThicknessMm: number;
+  notes?: string[];
 };
-
-export type ExportRecord = {
-  id: string;
-  generationId: string;
-  status: ExportStatus;
-  format: "stl" | "step" | "json";
-  filename: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export function formatTimestamp(value: string): string {
-  const date = new Date(value);
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "2-digit",
-    hour: "numeric",
-    minute: "2-digit"
-  }).format(date);
-}
