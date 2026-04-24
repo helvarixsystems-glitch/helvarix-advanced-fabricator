@@ -4,6 +4,8 @@ import {
   submitRemoteSimulationMock,
   getRemoteSimulationStatusMock,
   getRemoteSimulationResultMock,
+  persistHighFidelitySimulationResult,
+  persistRemoteSimulationFailure,
 } from "../execution/remoteWorkerMock";
 
 import { runHighFidelityPipeline } from "../execution/highFidelityPipeline";
@@ -85,7 +87,7 @@ async function runWorkerPipeline(
   try {
     console.log(`Running high-fidelity pipeline for job ${jobId}`);
 
-    const result = await runHighFidelityPipeline(payload.request, {
+    const pipeline = await runHighFidelityPipeline(payload.request, {
       enableDiskWrite: true,
       enableNativeExecution: ENABLE_NATIVE_SOLVERS,
       workspaceRootDirectory: `${WORKSPACE_ROOT}/${jobId}`,
@@ -93,8 +95,21 @@ async function runWorkerPipeline(
       calculixExecutable: CCX_EXEC,
     });
 
-    console.log(`Job ${jobId} complete | score=${result.result.score.total}`);
+    persistHighFidelitySimulationResult({
+      remoteJobId: jobId,
+      result: pipeline.result,
+      artifacts: pipeline.artifacts,
+      warnings: pipeline.warnings,
+      errors: pipeline.errors,
+    });
+
+    console.log(`Job ${jobId} complete | score=${pipeline.result.score.total}`);
   } catch (err) {
+    persistRemoteSimulationFailure({
+      remoteJobId: jobId,
+      error: err,
+    });
+
     console.error(`Job ${jobId} failed`, err);
   }
 }
