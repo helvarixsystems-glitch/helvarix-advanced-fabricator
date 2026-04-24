@@ -991,12 +991,24 @@ function App() {
               ))}
             </div>
 
-            <GraphPaperRoom
-              title={displayGeneration?.componentName ?? componentName}
-              geometry={displayGeneration?.result?.geometry}
-              mode={viewerMode}
-              status={displayGeneration?.status ?? "idle"}
-            />
+           <GraphPaperRoom
+  title={displayGeneration?.componentName ?? componentName}
+  geometry={
+    displayGeneration?.result
+      ? {
+          family: displayGeneration.result.geometry?.silhouette,
+          material: displayGeneration.result.derived?.material,
+          lengthMm: displayGeneration.result.derived?.lengthMm,
+          widthMm: displayGeneration.result.derived?.widthMm,
+          heightMm: displayGeneration.result.derived?.heightMm,
+          wallThicknessMm: displayGeneration.result.derived?.wallThicknessMm,
+          notes: displayGeneration.result.geometry?.notes
+        }
+      : undefined
+  }
+  mode={viewerMode}
+  status={displayGeneration?.status ?? "idle"}
+/>
 
             <div className="statusbar">
               <span>Status: {(displayGeneration?.status ?? "idle").toUpperCase()}</span>
