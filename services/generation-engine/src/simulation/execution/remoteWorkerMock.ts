@@ -1,4 +1,5 @@
 import { runSimulation } from "../simulationEngine";
+
 import {
   RemoteSimulationJobRecord,
   RemoteSimulationSubmitRequest,
@@ -7,17 +8,13 @@ import {
   RemoteSimulationResultResponse,
 } from "./remoteJobTypes";
 
+import {
+  SimulationResult,
+  SimulationArtifact,
+} from "../types";
+
 const jobs = new Map<string, RemoteSimulationJobRecord>();
 
-/**
- * In-memory mock worker.
- *
- * Purpose:
- * - Lets your hosted app submit simulation jobs now.
- * - Lets you test the exact API contract before real containers exist.
- * - Can later be replaced by a real worker backed by Redis, Supabase, S3/R2,
- *   Docker, Kubernetes, RunPod, Modal, AWS Batch, etc.
- */
 export async function submitRemoteSimulationMock(
   payload: RemoteSimulationSubmitRequest
 ): Promise<RemoteSimulationSubmitResponse> {
@@ -50,7 +47,7 @@ export async function submitRemoteSimulationMock(
 
   jobs.set(id, record);
 
-  void runMockJob(id);
+  void runMockFastEstimate(id);
 
   return {
     status: "queued",
@@ -82,9 +79,7 @@ export async function getRemoteSimulationStatusMock(
   return {
     status: record.status,
     remoteJobId,
-
     progress: statusToProgress(record.status),
-
     warnings: record.warnings,
     errors: record.errors,
   };
@@ -108,16 +103,81 @@ export async function getRemoteSimulationResultMock(
   return {
     status: record.status,
     remoteJobId,
-
     result: record.highFidelityResult ?? record.fastEstimate,
     artifacts: record.artifacts,
-
     warnings: record.warnings,
     errors: record.errors,
   };
 }
 
-async function runMockJob(remoteJobId: string): Promise<void> {
+export function persistHighFidelitySimulationResult(input: {
+  remoteJobId: string;
+  result: SimulationResult;
+  artifacts?: SimulationArtifact[];
+  warnings?: string[];
+  errors?: string[];
+}): void {
+  const record = jobs.get(input.remoteJobId);
+  if (!record) return;
+
+  const errors = input.errors ?? [];
+  const warnings = input.warnings ?? [];
+
+  jobs.set(input.remoteJobId, {
+    ...record,
+
+    status:
+      errors.length > 0 || input.result.status === "failed"
+        ? "failed"
+        : "completed",
+
+    completedAtIso: new Date().toISOString(),
+    updatedAtIso: new Date().toISOString(),
+
+    highFidelityResult: input.result,
+
+    artifacts: [
+      ...record.artifacts,
+      ...(input.artifacts ?? []),
+      ...input.result.artifacts,
+    ],
+
+    warnings: [
+      ...record.warnings,
+      ...warnings,
+      ...input.result.warnings,
+    ],
+
+    errors: [
+      ...record.errors,
+      ...errors,
+      ...input.result.errors,
+    ],
+  });
+}
+
+export function persistRemoteSimulationFailure(input: {
+  remoteJobId: string;
+  error: unknown;
+}): void {
+  const record = jobs.get(input.remoteJobId);
+  if (!record) return;
+
+  jobs.set(input.remoteJobId, {
+    ...record,
+    status: "failed",
+    completedAtIso: new Date().toISOString(),
+    updatedAtIso: new Date().toISOString(),
+    errors: [
+      ...record.errors,
+      input.error instanceof Error
+        ? input.error.message
+        : String(input.error),
+    ],
+  });
+}
+
+async function runMockFastEstimate(remoteJobId: string): Promise<void> {
   const record = jobs.get(remoteJobId);
   if (!record) return;
 
@@ -127,7 +187,7 @@ async function runMockJob(remoteJobId: string): Promise<void> {
       startedAtIso: new Date().toISOString(),
       warnings: [
         ...record.warnings,
-        "Mock worker is running internal simulation only. Real solver container not connected yet.",
+        "Fast estimate started while high-fidelity worker pipeline runs.",
       ],
     });
 
@@ -137,10 +197,8 @@ async function runMockJob(remoteJobId: string): Promise<void> {
     if (!latest) return;
 
     updateJob(remoteJobId, {
-      status: result.status === "completed" ? "completed" : "failed",
-      completedAtIso: new Date().toISOString(),
+      status: "running",
       fastEstimate: result,
-      highFidelityResult: result,
       artifacts: [...latest.artifacts, ...result.artifacts],
       warnings: [...latest.warnings, ...result.warnings],
       errors: [...latest.errors, ...result.errors],
