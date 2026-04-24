@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { SimulationPanel } from "./components/workspace/SimulationPanel";
 import {
   AppShell,
   BlackButton,
@@ -22,7 +23,8 @@ import { componentRegistry } from "@haf/component-registry";
 import "./styles.css";
 
 const API_BASE =
-  (globalThis as { __HAF_API__?: string }).__HAF_API__ ?? "https://haf-api.YOUR-SUBDOMAIN.workers.dev";
+  (globalThis as { __HAF_API__?: string }).__HAF_API__ ??
+  "https://haf-api.YOUR-SUBDOMAIN.workers.dev";
 
 const MATERIAL_OPTIONS = [
   { label: "PEEK-CF", value: "PEEK-CF" },
@@ -44,7 +46,10 @@ const VIEW_MODE_OPTIONS: Array<{ label: string; value: ViewerMode }> = [
 ];
 
 function App() {
-  const [credits, setCredits] = React.useState<CreditBalance>({ available: 184, reserved: 0 });
+  const [credits, setCredits] = React.useState<CreditBalance>({
+    available: 184,
+    reserved: 0
+  });
 
   const [projects, setProjects] = React.useState<ProjectSummary[]>([]);
   const [activeProjectId, setActiveProjectId] = React.useState<string>("proj_0001");
@@ -58,7 +63,8 @@ function App() {
   const [submittingExport, setSubmittingExport] = React.useState(false);
 
   const [selectedFamily, setSelectedFamily] = React.useState("nosecone");
-  const [exportFormat, setExportFormat] = React.useState<(typeof EXPORT_OPTIONS)[number]["value"]>("stl");
+  const [exportFormat, setExportFormat] =
+    React.useState<(typeof EXPORT_OPTIONS)[number]["value"]>("stl");
   const [viewerMode, setViewerMode] = React.useState<ViewerMode>("concept");
 
   const [form, setForm] = React.useState<GenerationInput>({
@@ -158,7 +164,9 @@ function App() {
         setProjects(data.projects);
 
         setActiveProjectId((current) => {
-          const stillExists = data.projects.some((project: ProjectSummary) => project.id === current);
+          const stillExists = data.projects.some(
+            (project: ProjectSummary) => project.id === current
+          );
           return stillExists ? current : data.projects[0].id;
         });
       }
@@ -169,14 +177,19 @@ function App() {
 
   async function loadGenerations(projectId: string) {
     try {
-      const response = await fetch(`${API_BASE}/generations?projectId=${encodeURIComponent(projectId)}`);
+      const response = await fetch(
+        `${API_BASE}/generations?projectId=${encodeURIComponent(projectId)}`
+      );
       const data = await response.json();
 
       if (Array.isArray(data.generations)) {
         setGenerations(data.generations);
 
         setSelectedGenerationId((current) => {
-          if (current && data.generations.some((generation: GenerationSummary) => generation.id === current)) {
+          if (
+            current &&
+            data.generations.some((generation: GenerationSummary) => generation.id === current)
+          ) {
             return current;
           }
           return data.generations[0]?.id ?? null;
@@ -220,6 +233,7 @@ function App() {
       }
 
       await Promise.all([loadCredits(), loadGenerations(activeProjectId)]);
+
       if (data.generation?.id) {
         setSelectedGenerationId(data.generation.id);
       }
@@ -264,6 +278,7 @@ function App() {
       }
 
       await Promise.all([loadCredits(), loadGenerations(activeProjectId)]);
+
       if (data.generation?.id) {
         setSelectedGenerationId(data.generation.id);
       }
@@ -343,7 +358,10 @@ function App() {
             title="Parameters"
             subtitle="Define printable geometry constraints for additive manufacturing."
             footer={
-              <BlackButton onClick={handleGenerateConcept} disabled={submittingGeneration || loadingWorkspace}>
+              <BlackButton
+                onClick={handleGenerateConcept}
+                disabled={submittingGeneration || loadingWorkspace}
+              >
                 {submittingGeneration ? "Submitting..." : "Generate Concept"}
               </BlackButton>
             }
@@ -358,11 +376,19 @@ function App() {
                         label: `${project.name} · ${project.workspaceLabel}`,
                         value: project.id
                       }))
-                    : [{ label: "Lunar Nosecone Study · Fabrication Bay 01", value: "proj_0001" }]
+                    : [
+                        {
+                          label: "Lunar Nosecone Study · Fabrication Bay 01",
+                          value: "proj_0001"
+                        }
+                      ]
                 }
                 onChange={(value) => setActiveProjectId(value)}
               />
-              <MetricRow label="Project Family" value={activeProject?.componentFamily ?? form.componentFamily} />
+              <MetricRow
+                label="Project Family"
+                value={activeProject?.componentFamily ?? form.componentFamily}
+              />
               <MetricRow label="Manufacturing Mode" value="Additive / 3D Printing" />
             </SidebarSection>
 
@@ -379,7 +405,12 @@ function App() {
               <InputField
                 label="Component Name"
                 value={form.componentName}
-                onChange={(value) => setForm((prev) => ({ ...prev, componentName: value }))}
+                onChange={(value) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    componentName: value
+                  }))
+                }
               />
             </SidebarSection>
 
@@ -388,19 +419,34 @@ function App() {
                 label="Length (mm)"
                 type="number"
                 value={form.lengthMm}
-                onChange={(value) => setForm((prev) => ({ ...prev, lengthMm: Number(value) }))}
+                onChange={(value) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    lengthMm: Number(value)
+                  }))
+                }
               />
               <InputField
                 label="Base Diameter (mm)"
                 type="number"
                 value={form.baseDiameterMm}
-                onChange={(value) => setForm((prev) => ({ ...prev, baseDiameterMm: Number(value) }))}
+                onChange={(value) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    baseDiameterMm: Number(value)
+                  }))
+                }
               />
               <InputField
                 label="Wall Thickness (mm)"
                 type="number"
                 value={form.wallThicknessMm}
-                onChange={(value) => setForm((prev) => ({ ...prev, wallThicknessMm: Number(value) }))}
+                onChange={(value) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    wallThicknessMm: Number(value)
+                  }))
+                }
               />
             </SidebarSection>
 
@@ -409,13 +455,23 @@ function App() {
                 label="Build Material"
                 defaultValue={form.material}
                 options={MATERIAL_OPTIONS}
-                onChange={(value) => setForm((prev) => ({ ...prev, material: value }))}
+                onChange={(value) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    material: value
+                  }))
+                }
               />
               <InputField
                 label="Target Mass (kg)"
                 type="number"
                 value={form.targetMassKg}
-                onChange={(value) => setForm((prev) => ({ ...prev, targetMassKg: Number(value) }))}
+                onChange={(value) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    targetMassKg: Number(value)
+                  }))
+                }
               />
             </SidebarSection>
 
@@ -424,7 +480,11 @@ function App() {
               <MetricRow label="Mode" value="Concept Geometry" />
               <MetricRow
                 label="Printable State"
-                value={displayGeneration?.status === "completed" ? "Validated Concept" : "Pending Generation"}
+                value={
+                  displayGeneration?.status === "completed"
+                    ? "Validated Concept"
+                    : "Pending Generation"
+                }
               />
             </SidebarSection>
           </WorkspacePanel>
@@ -440,7 +500,9 @@ function App() {
                 <button
                   key={option.value}
                   type="button"
-                  className={`viewer-mode-button ${viewerMode === option.value ? "viewer-mode-button-active" : ""}`}
+                  className={`viewer-mode-button ${
+                    viewerMode === option.value ? "viewer-mode-button-active" : ""
+                  }`}
                   onClick={() => setViewerMode(option.value)}
                 >
                   {option.label}
@@ -458,16 +520,27 @@ function App() {
             <div className="statusbar">
               <span>Status: {(displayGeneration?.status ?? "idle").toUpperCase()}</span>
               <span>Generation: {displayGeneration?.id ?? "—"}</span>
-              <span>Updated: {displayGeneration ? formatTimestamp(displayGeneration.updatedAt) : "—"}</span>
+              <span>
+                Updated: {displayGeneration ? formatTimestamp(displayGeneration.updatedAt) : "—"}
+              </span>
             </div>
           </section>
 
-          <WorkspacePanel title="Results" subtitle="Validation, lineage, and additive export status.">
+          <WorkspacePanel
+            title="Results"
+            subtitle="Validation, lineage, and additive export status."
+          >
             <SidebarSection title="Selected Run">
               <MetricRow label="Revision" value={displayGeneration?.result?.revision ?? "—"} />
               <MetricRow label="Status" value={displayGeneration?.status ?? "—"} />
-              <MetricRow label="Export State" value={displayGeneration?.result?.exportState ?? "—"} />
-              <MetricRow label="Token Cost" value={displayGeneration ? String(displayGeneration.tokenCost) : "—"} />
+              <MetricRow
+                label="Export State"
+                value={displayGeneration?.result?.exportState ?? "—"}
+              />
+              <MetricRow
+                label="Token Cost"
+                value={displayGeneration ? String(displayGeneration.tokenCost) : "—"}
+              />
               <MetricRow
                 label="Estimated Mass"
                 value={
@@ -476,8 +549,13 @@ function App() {
                     : "—"
                 }
               />
-              <MetricRow label="Parent Run" value={displayGeneration?.parentGenerationId ?? "Root Concept"} />
+              <MetricRow
+                label="Parent Run"
+                value={displayGeneration?.parentGenerationId ?? "Root Concept"}
+              />
             </SidebarSection>
+
+            <SimulationPanel apiBase={API_BASE} input={form} />
 
             <SidebarSection title="Validation">
               {validationMessages.length ? (
@@ -501,7 +579,10 @@ function App() {
               <SelectField
                 label="Export Format"
                 defaultValue={exportFormat}
-                options={EXPORT_OPTIONS.map((item) => ({ label: item.label, value: item.value }))}
+                options={EXPORT_OPTIONS.map((item) => ({
+                  label: item.label,
+                  value: item.value
+                }))}
                 onChange={(value) => setExportFormat(value as "stl" | "step" | "json")}
               />
               <MetricRow
@@ -515,6 +596,7 @@ function App() {
                 <div className="history-list">
                   {generations.map((generation) => {
                     const isActive = generation.id === displayGeneration?.id;
+
                     return (
                       <button
                         key={generation.id}
@@ -526,15 +608,23 @@ function App() {
                         }}
                       >
                         <div className="history-item-top">
-                          <span className="history-item-name">{generation.componentName}</span>
-                          <span className={`history-chip history-chip-${statusTone(generation.status)}`}>
+                          <span className="history-item-name">
+                            {generation.componentName}
+                          </span>
+                          <span
+                            className={`history-chip history-chip-${statusTone(
+                              generation.status
+                            )}`}
+                          >
                             {generation.status}
                           </span>
                         </div>
+
                         <div className="history-item-meta">
                           <span>{generation.id}</span>
                           <span>{formatTimestamp(generation.updatedAt)}</span>
                         </div>
+
                         <div className="history-item-meta">
                           <span>{generation.input.componentFamily}</span>
                           <span>{generation.tokenCost} credits</span>
@@ -558,7 +648,11 @@ function App() {
                 <BlackButton
                   subdued
                   onClick={handleQueueExport}
-                  disabled={!displayGeneration || displayGeneration.status !== "completed" || submittingExport}
+                  disabled={
+                    !displayGeneration ||
+                    displayGeneration.status !== "completed" ||
+                    submittingExport
+                  }
                 >
                   {submittingExport ? "Queueing Export..." : "Queue Export"}
                 </BlackButton>
