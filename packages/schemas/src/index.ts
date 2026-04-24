@@ -1,153 +1,158 @@
-import { z } from "zod";
+// packages/schemas/src/index.ts
 
-// ==============================
-// ENUMS
-// ==============================
+export type ComponentFamily =
+  | "structural-bracket"
+  | "bell-nozzle"
+  | "pressure-vessel"
+  | "rover-arm"
+  | "grid-fin";
 
-const componentFamilySchema = z.enum([
-  "structural-bracket",
-  "bell-nozzle",
-  "pressure-vessel",
-  "rover-arm",
-  "grid-fin"
-]);
+/**
+ * =========================
+ * REQUIREMENTS
+ * =========================
+ */
 
-const loadDirectionSchema = z.enum(["vertical", "lateral", "multi-axis"]);
-const manufacturingProcessSchema = z.enum(["additive", "machined"]);
-const optimizationPrioritySchema = z.enum(["lightweight", "stiffness", "balanced"]);
+export interface BaseRequirements {
+  componentName: string;
+  safetyFactor: number;
+  targetMassKg?: number;
+  optimizationPriority: "mass" | "strength" | "balanced";
+}
 
-const oxidizerSchema = z.enum(["LOX", "N2O", "H2O2"]);
-const fuelSchema = z.enum(["RP1", "CH4", "H2", "HTPB"]);
-const coolingModeSchema = z.enum(["ablative", "regenerative", "radiative"]);
+/**
+ * Structural Bracket
+ */
+export interface StructuralBracketRequirements extends BaseRequirements {
+  family: "structural-bracket";
 
-// ==============================
-// STRUCTURAL BRACKET
-// ==============================
+  requiredLoadN: number;
+  loadDirection: "x" | "y" | "z";
+  vibrationHz: number;
 
-export const structuralBracketRequirementsSchema = z.object({
-  componentName: z.string().min(2),
+  boltCount: number;
+  boltDiameterMm: number;
+  boltSpacingMm: number;
 
-  loadCase: z.object({
-    forceN: z.number().positive(),
-    direction: loadDirectionSchema,
-    vibrationHz: z.number().positive().optional()
-  }),
+  maxWidthMm: number;
+  maxHeightMm: number;
+  maxDepthMm: number;
 
-  safetyFactor: z.number().min(1).max(5),
+  minWallThicknessMm: number;
+  maxOverhangDeg: number;
+}
 
-  mounting: z.object({
-    boltCount: z.number().int().min(2).max(16),
-    boltDiameterMm: z.number().positive(),
-    spacingMm: z.number().positive()
-  }),
+/**
+ * Bell Nozzle
+ */
+export interface BellNozzleRequirements extends BaseRequirements {
+  family: "bell-nozzle";
 
-  envelope: z.object({
-    maxWidthMm: z.number().positive(),
-    maxHeightMm: z.number().positive(),
-    maxDepthMm: z.number().positive()
-  }),
+  targetThrustN: number;
+  burnDurationSec: number;
 
-  manufacturing: z.object({
-    process: manufacturingProcessSchema,
-    minWallThicknessMm: z.number().positive(),
-    maxOverhangDeg: z.number().min(10).max(80),
-    supportAllowed: z.boolean()
-  }),
+  chamberPressureBar: number;
+  ambientPressurePa: number;
 
-  objectives: z.object({
-    targetMassKg: z.number().positive().optional(),
-    priority: optimizationPrioritySchema
-  })
-});
+  oxidizer: string;
+  fuel: string;
+  mixtureRatio: number;
 
-// ==============================
-// BELL NOZZLE
-// ==============================
+  coolingMode: "ablative" | "regenerative" | "film";
 
-export const bellNozzleRequirementsSchema = z.object({
-  componentName: z.string().min(2),
+  maxLengthMm: number;
+  maxExitDiameterMm: number;
 
-  performance: z.object({
-    targetThrustN: z.number().positive(),
-    burnDurationSec: z.number().positive(),
-    chamberPressureBar: z.number().positive().optional(),
-    ambientPressurePa: z.number().positive()
-  }),
+  minWallThicknessMm: number;
+}
 
-  propellant: z.object({
-    oxidizer: oxidizerSchema,
-    fuel: fuelSchema,
-    mixtureRatio: z.number().positive().optional()
-  }),
+/**
+ * TEMP fallback for unfinished families
+ */
+export type GenericStructuralRequirements =
+  StructuralBracketRequirements;
 
-  envelope: z.object({
-    maxLengthMm: z.number().positive(),
-    maxExitDiameterMm: z.number().positive()
-  }),
+/**
+ * =========================
+ * INPUT
+ * =========================
+ */
 
-  thermal: z.object({
-    coolingMode: coolingModeSchema,
-    maxWallTemperatureC: z.number().positive().optional()
-  }),
+export type GenerationInput =
+  | StructuralBracketRequirements
+  | BellNozzleRequirements
+  | GenericStructuralRequirements;
 
-  manufacturing: z.object({
-    process: manufacturingProcessSchema,
-    minWallThicknessMm: z.number().positive(),
-    supportAllowed: z.boolean()
-  }),
+/**
+ * =========================
+ * CANDIDATE GEOMETRY
+ * =========================
+ */
 
-  objectives: z.object({
-    priority: z.enum(["efficiency", "compactness", "thermal-margin", "balanced"]),
-    targetMassKg: z.number().positive().optional()
-  }),
+export interface CandidateGeometry {
+  id: string;
+  family: ComponentFamily;
 
-  safetyFactor: z.number().min(1).max(5)
-});
+  material: string;
 
-// ==============================
-// GENERATION INPUT (DISCRIMINATED)
-// ==============================
+  widthMm?: number;
+  heightMm?: number;
+  depthMm?: number;
+  lengthMm?: number;
 
-export const generationInputSchema = z.discriminatedUnion("componentFamily", [
-  z.object({
-    componentFamily: z.literal("structural-bracket"),
-    requirements: structuralBracketRequirementsSchema
-  }),
-  z.object({
-    componentFamily: z.literal("bell-nozzle"),
-    requirements: bellNozzleRequirementsSchema
-  }),
-  z.object({
-    componentFamily: z.enum(["pressure-vessel", "rover-arm", "grid-fin"]),
-    requirements: structuralBracketRequirementsSchema
-  })
-]);
+  wallThicknessMm: number;
 
-// ==============================
-// API WRAPPERS
-// ==============================
+  estimatedMassKg: number;
+  estimatedStressMpa?: number;
+  estimatedDisplacementMm?: number;
 
-export const createGenerationSchema = z.object({
-  projectId: z.string().min(2),
-  input: generationInputSchema
-});
+  safetyFactorEstimate: number;
 
-export const createIterationSchema = z.object({
-  projectId: z.string().min(2),
-  parentGenerationId: z.string().min(2),
-  input: generationInputSchema
-});
+  manufacturabilityScore: number;
+  supportBurdenScore: number;
+  performanceScore: number;
+  totalScore: number;
 
-export const queueExportSchema = z.object({
-  generationId: z.string().min(2),
-  format: z.enum(["stl", "step", "json", "package"]).default("stl")
-});
+  rejected: boolean;
+  rejectionReasons: string[];
 
-// ==============================
-// TYPES
-// ==============================
+  derivedParameters: Record<string, any>;
+}
 
-export type GenerationInputSchema = z.infer<typeof generationInputSchema>;
-export type CreateGenerationInput = z.infer<typeof createGenerationSchema>;
-export type CreateIterationInput = z.infer<typeof createIterationSchema>;
-export type QueueExportInput = z.infer<typeof queueExportSchema>;
+/**
+ * =========================
+ * RESULT
+ * =========================
+ */
+
+export interface GenerationResult {
+  revision: string;
+
+  estimatedMassKg: number;
+
+  estimatedBurn?: {
+    burnDurationSec: number;
+    estimatedIspSec: number;
+  };
+
+  geometryPreview: {
+    family: ComponentFamily;
+    dimensions: Record<string, number>;
+  };
+
+  derivedGeometry: Record<string, any>;
+
+  validations: string[];
+
+  candidatesEvaluated: number;
+  candidatesAccepted: number;
+  candidatesRejected: number;
+
+  selectedCandidate: CandidateGeometry | null;
+  rejectedCandidates: CandidateGeometry[];
+
+  exportState: {
+    canExport: boolean;
+    formats: string[];
+  };
+}
