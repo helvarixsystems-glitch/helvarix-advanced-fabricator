@@ -1,14 +1,27 @@
 {
   "name": "helvarix-advanced-fabricator",
+  "version": "1.0.0",
   "private": true,
-  "version": "0.0.1",
-  "packageManager": "pnpm@9.12.0",
+  "type": "module",
+
   "scripts": {
-    "dev:web": "pnpm --filter web dev",
-    "dev:api": "pnpm --filter api dev",
-    "build": "turbo build"
+    "dev": "ts-node-dev --respawn --transpile-only services/generation-engine/src/simulation/worker/server.ts",
+    "build": "tsc",
+    "start": "node dist/services/generation-engine/src/simulation/worker/server.js",
+
+    "solver:worker": "ts-node services/generation-engine/src/simulation/worker/server.ts",
+    "solver:worker:prod": "node dist/services/generation-engine/src/simulation/worker/server.js",
+
+    "test:simulation": "ts-node services/generation-engine/src/simulation/selfTest.ts"
   },
+
+  "dependencies": {
+  },
+
   "devDependencies": {
-    "turbo": "^2.0.0"
+    "@types/node": "^20.11.0",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.3.3"
   }
 }
