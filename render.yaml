@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: helvarix-solver-worker
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.solver
+    dockerContext: .
+    region: ohio
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 8787
+      - key: HELVARIX_ENABLE_NATIVE_SOLVERS
+        value: "true"
+      - key: HELVARIX_SOLVER_WORKSPACE_ROOT
+        value: /tmp/helvarix-solver
+      - key: HELVARIX_GMSH_EXECUTABLE
+        value: gmsh
+      - key: HELVARIX_CALCULIX_EXECUTABLE
+        value: ccx
