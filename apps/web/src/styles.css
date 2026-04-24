@@ -178,21 +178,24 @@ button:disabled {
 
 .right-panel-tabs {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: 0.9fr 1fr 1fr 0.85fr 0.85fr;
   gap: 6px;
   margin-bottom: 12px;
 }
 
 .right-panel-tab {
   min-height: 34px;
-  padding: 8px 6px;
+  padding: 8px 4px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.72);
   color: #59616d;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 760;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-align: center;
 }
 
 .right-panel-tab-active {
