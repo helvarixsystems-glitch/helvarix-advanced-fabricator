@@ -10,6 +10,33 @@ export type ComponentFamily =
   | "grid-fin";
 
 // ==============================
+// APP METADATA (FIX BUILD)
+// ==============================
+
+export const appName = "Helvarix Advanced Fabricator";
+
+// ==============================
+// UTILITIES (FIX BUILD)
+// ==============================
+
+export function formatTimestamp(value: string | number | Date) {
+  try {
+    return new Date(value).toLocaleString();
+  } catch {
+    return "—";
+  }
+}
+
+// ==============================
+// CREDIT MODEL (FIX BUILD)
+// ==============================
+
+export type CreditBalance = {
+  available: number;
+  reserved: number;
+};
+
+// ==============================
 // REQUIREMENTS-FIRST INPUT MODEL
 // ==============================
 
