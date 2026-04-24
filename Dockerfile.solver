@@ -14,16 +14,20 @@ RUN apt-get update && apt-get install -y \
 COPY package*.json ./
 COPY services ./services
 COPY packages ./packages
+COPY apps ./apps
 COPY tsconfig*.json ./
+COPY render.yaml ./
 
 RUN npm install
+RUN npm install -g tsx
 
 ENV NODE_ENV=production
 ENV HELVARIX_SOLVER_WORKSPACE_ROOT=/tmp/helvarix-solver
 ENV HELVARIX_ENABLE_NATIVE_SOLVERS=true
 ENV HELVARIX_GMSH_EXECUTABLE=gmsh
 ENV HELVARIX_CALCULIX_EXECUTABLE=ccx
+ENV PORT=8787
 
 EXPOSE 8787
 
-CMD ["npm", "run", "solver:worker"]
+CMD ["tsx", "services/generation-engine/src/simulation/worker/server.ts"]
