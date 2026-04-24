@@ -1,6 +1,10 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { SimulationPanel } from "./components/workspace/SimulationPanel";
+import {
+  SimulationPanel,
+  type SimulationPanelHandle
+} from "./components/workspace/SimulationPanel";
+import type { SimulationRecord } from "./lib/simulationClient";
 import {
   AppShell,
   BlackButton,
@@ -32,6 +36,7 @@ const MATERIAL_OPTIONS = [
 ];
 
 const EXPORT_OPTIONS = [
+  { label: "Complete Package", value: "package" },
   { label: "STL", value: "stl" },
   { label: "STEP", value: "step" },
   { label: "JSON", value: "json" }
@@ -43,6 +48,7 @@ const VIEW_MODE_OPTIONS: Array<{ label: string; value: ViewerMode }> = [
   { label: "Simulation", value: "simulation" }
 ];
 
+type ExportFormat = (typeof EXPORT_OPTIONS)[number]["value"];
 type RightPanelTab = "summary" | "simulation" | "validation" | "export" | "history";
 
 const RIGHT_PANEL_TABS: Array<{ label: string; value: RightPanelTab }> = [
@@ -54,6 +60,8 @@ const RIGHT_PANEL_TABS: Array<{ label: string; value: RightPanelTab }> = [
 ];
 
 function App() {
+  const simulationPanelRef = React.useRef<SimulationPanelHandle | null>(null);
+
   const [credits, setCredits] = React.useState<CreditBalance>({
     available: 184,
     reserved: 0
@@ -64,6 +72,7 @@ function App() {
 
   const [generations, setGenerations] = React.useState<GenerationSummary[]>([]);
   const [selectedGenerationId, setSelectedGenerationId] = React.useState<string | null>(null);
+  const [latestSimulation, setLatestSimulation] = React.useState<SimulationRecord | null>(null);
 
   const [loadingWorkspace, setLoadingWorkspace] = React.useState(true);
   const [submittingGeneration, setSubmittingGeneration] = React.useState(false);
@@ -71,8 +80,7 @@ function App() {
   const [submittingExport, setSubmittingExport] = React.useState(false);
 
   const [selectedFamily, setSelectedFamily] = React.useState("nosecone");
-  const [exportFormat, setExportFormat] =
-    React.useState<(typeof EXPORT_OPTIONS)[number]["value"]>("stl");
+  const [exportFormat, setExportFormat] = React.useState<ExportFormat>("package");
   const [viewerMode, setViewerMode] = React.useState<ViewerMode>("concept");
   const [rightPanelTab, setRightPanelTab] = React.useState<RightPanelTab>("summary");
 
@@ -143,7 +151,6 @@ function App() {
 
   async function loadWorkspace() {
     setLoadingWorkspace(true);
-
     try {
       await Promise.all([loadCredits(), loadProjects()]);
     } finally {
@@ -155,10 +162,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/credits/balance`);
       const data = await response.json();
-
-      if (data.credits) {
-        setCredits(data.credits);
-      }
+      if (data.credits) setCredits(data.credits);
     } catch {
       // keep starter values
     }
@@ -171,13 +175,11 @@ function App() {
 
       if (Array.isArray(data.projects) && data.projects.length > 0) {
         setProjects(data.projects);
-
-        setActiveProjectId((current) => {
-          const stillExists = data.projects.some(
-            (project: ProjectSummary) => project.id === current
-          );
-          return stillExists ? current : data.projects[0].id;
-        });
+        setActiveProjectId((current) =>
+          data.projects.some((project: ProjectSummary) => project.id === current)
+            ? current
+            : data.projects[0].id
+        );
       }
     } catch {
       // keep starter state
@@ -201,6 +203,7 @@ function App() {
           ) {
             return current;
           }
+
           return data.generations[0]?.id ?? null;
         });
       }
@@ -225,9 +228,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/generations`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json"
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({
           projectId: activeProjectId,
           input: form
@@ -269,9 +270,7 @@ function App() {
     try {
       const response = await fetch(`${API_BASE}/iterations`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json"
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({
           projectId: activeProjectId,
           parentGenerationId: displayGeneration.id,
@@ -298,45 +297,120 @@ function App() {
     }
   }
 
-  async function handleQueueExport() {
+  async function handleRunSimulationFromFooter() {
+    setRightPanelTab("simulation");
+    await simulationPanelRef.current?.run();
+  }
+
+  async function handleExportPackage() {
     if (!displayGeneration) {
-      alert("Select a completed generation before queueing export.");
+      alert("Select a completed generation before exporting.");
       return;
     }
 
     if (displayGeneration.status !== "completed") {
-      alert("Exports can only be queued for completed generations.");
+      alert("Exports can only be created for completed generations.");
       return;
     }
 
     setSubmittingExport(true);
 
     try {
-      const response = await fetch(`${API_BASE}/exports`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({
-          generationId: displayGeneration.id,
-          format: exportFormat
-        })
-      });
+      let queuedExport: unknown = null;
 
-      const data = await response.json();
+      const serverFormat = exportFormat === "package" ? "stl" : exportFormat;
 
-      if (!response.ok) {
-        alert(typeof data.error === "string" ? data.error : "Export queue request failed.");
-        return;
+      try {
+        const response = await fetch(`${API_BASE}/exports`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            generationId: displayGeneration.id,
+            format: serverFormat
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          alert(typeof data.error === "string" ? data.error : "Export request failed.");
+          return;
+        }
+
+        queuedExport = data.export ?? null;
+        await loadGenerations(activeProjectId);
+      } catch {
+        queuedExport = {
+          mode: "local-package-only",
+          note: "API export queue unavailable; local package was still generated."
+        };
       }
 
-      await loadGenerations(activeProjectId);
-      alert(`Export queued: ${data.export?.filename ?? "artifact"}`);
-    } catch {
-      alert("Could not reach the API.");
+      const packageName = `${safeFileName(displayGeneration.componentName)}-${displayGeneration.id}`;
+
+      if (exportFormat === "package") {
+        await downloadCompletePackage({
+          packageName,
+          generation: displayGeneration,
+          project: activeProject,
+          simulation: latestSimulation,
+          queuedExport
+        });
+      } else if (exportFormat === "json") {
+        downloadBlob(
+          `${packageName}.json`,
+          "application/json",
+          JSON.stringify(
+            {
+              project: activeProject,
+              generation: displayGeneration,
+              simulation: latestSimulation,
+              export: queuedExport
+            },
+            null,
+            2
+          )
+        );
+      } else if (exportFormat === "stl") {
+        downloadBlob(
+          `${packageName}.stl`,
+          "model/stl",
+          buildPreviewStl(displayGeneration)
+        );
+      } else {
+        downloadBlob(
+          `${packageName}.step`,
+          "text/plain",
+          buildPlaceholderStep(displayGeneration)
+        );
+      }
     } finally {
       setSubmittingExport(false);
     }
+  }
+
+  function getRightPanelFooter() {
+    if (rightPanelTab === "simulation") {
+      return (
+        <BlackButton subdued onClick={handleRunSimulationFromFooter}>
+          Run Simulation
+        </BlackButton>
+      );
+    }
+
+    if (rightPanelTab === "export") {
+      return (
+        <BlackButton
+          subdued
+          onClick={handleExportPackage}
+          disabled={!displayGeneration || displayGeneration.status !== "completed" || submittingExport}
+        >
+          {submittingExport ? "Exporting..." : "Export"}
+        </BlackButton>
+      );
+    }
+
+    return null;
   }
 
   function statusTone(status?: string) {
@@ -512,11 +586,7 @@ function App() {
                   className={`viewer-mode-button ${
                     viewerMode === option.value ? "viewer-mode-button-active" : ""
                   }`}
-                  onClick={() => {
-                    setViewerMode(option.value);
-                    if (option.value === "simulation") setRightPanelTab("simulation");
-                    if (option.value === "concept") setRightPanelTab("summary");
-                  }}
+                  onClick={() => setViewerMode(option.value)}
                 >
                   {option.label}
                 </button>
@@ -542,24 +612,7 @@ function App() {
           <WorkspacePanel
             title="Results"
             subtitle="Tabbed validation, lineage, simulation, and export status."
-            footer={
-              viewerMode === "concept" ? (
-                <BlackButton
-                  onClick={handleGenerateConcept}
-                  disabled={submittingGeneration || loadingWorkspace}
-                >
-                  {submittingGeneration ? "Submitting..." : "Generate"}
-                </BlackButton>
-              ) : viewerMode === "simulation" ? null : (
-                <BlackButton
-                  subdued
-                  onClick={handleCreateIteration}
-                  disabled={!displayGeneration || submittingIteration}
-                >
-                  {submittingIteration ? "Creating Iteration..." : "Create Iteration"}
-                </BlackButton>
-              )
-            }
+            footer={getRightPanelFooter()}
           >
             <div className="right-panel-tabs" role="tablist" aria-label="Results panel tabs">
               {RIGHT_PANEL_TABS.map((tab) => (
@@ -606,14 +659,14 @@ function App() {
 
                   <SidebarSection title="Readiness">
                     <div className="compact-score-card">
-                      <span>Current Phase</span>
+                      <span>Current Viewer</span>
                       <strong>{viewerMode.toUpperCase()}</strong>
                     </div>
                     <div className="message message-success">
                       <div className="message-title">Workflow Alignment</div>
                       <div className="message-body">
-                        Generate constraint-filtered geometry, review manufacturability, then run
-                        simulation validation before export.
+                        Generate constraint-filtered geometry, validate manufacturability, run
+                        simulation, then export the complete artifact package.
                       </div>
                     </div>
                   </SidebarSection>
@@ -622,9 +675,10 @@ function App() {
 
               {rightPanelTab === "simulation" ? (
                 <SimulationPanel
+                  ref={simulationPanelRef}
                   apiBase={API_BASE}
                   input={form}
-                  showRunButton={viewerMode === "simulation"}
+                  onSimulationChange={setLatestSimulation}
                 />
               ) : null}
 
@@ -650,48 +704,42 @@ function App() {
 
               {rightPanelTab === "export" ? (
                 <>
-                  <SidebarSection title="Export">
+                  <SidebarSection title="Export Package">
                     <SelectField
-                      label="Export Format"
+                      label="Export Type"
                       defaultValue={exportFormat}
                       options={EXPORT_OPTIONS.map((item) => ({
                         label: item.label,
                         value: item.value
                       }))}
-                      onChange={(value) => setExportFormat(value as "stl" | "step" | "json")}
+                      onChange={(value) => setExportFormat(value as ExportFormat)}
                     />
                     <MetricRow
                       label="Export Readiness"
                       value={
                         displayGeneration?.status === "completed"
-                          ? "Ready To Queue"
+                          ? "Ready To Export"
                           : "Generation Required"
+                      }
+                    />
+                    <MetricRow
+                      label="Package Contents"
+                      value={
+                        exportFormat === "package"
+                          ? "STL, report, geometry JSON, simulation JSON"
+                          : exportFormat.toUpperCase()
                       }
                     />
                   </SidebarSection>
 
-                  <SidebarSection title="Actions">
-                    <div className="actions">
-                      <BlackButton
-                        subdued
-                        onClick={handleQueueExport}
-                        disabled={
-                          !displayGeneration ||
-                          displayGeneration.status !== "completed" ||
-                          submittingExport
-                        }
-                      >
-                        {submittingExport ? "Queueing Export..." : "Queue Export"}
-                      </BlackButton>
-
-                      <BlackButton
-                        subdued
-                        onClick={handleCreateIteration}
-                        disabled={!displayGeneration || submittingIteration}
-                      >
-                        {submittingIteration ? "Creating Iteration..." : "Create Iteration"}
-                      </BlackButton>
-                    </div>
+                  <SidebarSection title="Iteration">
+                    <BlackButton
+                      subdued
+                      onClick={handleCreateIteration}
+                      disabled={!displayGeneration || submittingIteration}
+                    >
+                      {submittingIteration ? "Creating Iteration..." : "Create Iteration"}
+                    </BlackButton>
                   </SidebarSection>
                 </>
               ) : null}
@@ -714,9 +762,7 @@ function App() {
                             }}
                           >
                             <div className="history-item-top">
-                              <span className="history-item-name">
-                                {generation.componentName}
-                              </span>
+                              <span className="history-item-name">{generation.componentName}</span>
                               <span
                                 className={`history-chip history-chip-${statusTone(
                                   generation.status
@@ -755,6 +801,261 @@ function App() {
       </div>
     </AppShell>
   );
+}
+
+function safeFileName(value: string) {
+  return value.replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase();
+}
+
+function downloadBlob(filename: string, mimeType: string, content: string | Blob) {
+  const blob = content instanceof Blob ? content : new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+
+  window.setTimeout(() => URL.revokeObjectURL(url), 250);
+}
+
+async function downloadCompletePackage(args: {
+  packageName: string;
+  generation: GenerationSummary;
+  project: ProjectSummary | null;
+  simulation: SimulationRecord | null;
+  queuedExport: unknown;
+}) {
+  const { packageName, generation, project, simulation, queuedExport } = args;
+
+  const report = buildReportText(generation, project, simulation);
+  const stl = buildPreviewStl(generation);
+
+  const files = [
+    {
+      name: "geometry/part-preview.stl",
+      content: stl
+    },
+    {
+      name: "reports/validation-report.txt",
+      content: report
+    },
+    {
+      name: "reports/generation.json",
+      content: JSON.stringify(generation, null, 2)
+    },
+    {
+      name: "reports/project.json",
+      content: JSON.stringify(project, null, 2)
+    },
+    {
+      name: "simulation/simulation.json",
+      content: JSON.stringify(simulation ?? { status: "not-run" }, null, 2)
+    },
+    {
+      name: "export/export-record.json",
+      content: JSON.stringify(queuedExport, null, 2)
+    },
+    {
+      name: "manifest.json",
+      content: JSON.stringify(
+        {
+          packageName,
+          generatedAt: new Date().toISOString(),
+          generationId: generation.id,
+          componentName: generation.componentName,
+          contents: [
+            "geometry/part-preview.stl",
+            "reports/validation-report.txt",
+            "reports/generation.json",
+            "reports/project.json",
+            "simulation/simulation.json",
+            "export/export-record.json"
+          ]
+        },
+        null,
+        2
+      )
+    }
+  ];
+
+  const zip = createZip(files);
+  downloadBlob(`${packageName}-complete-package.zip`, "application/zip", zip);
+}
+
+function buildReportText(
+  generation: GenerationSummary,
+  project: ProjectSummary | null,
+  simulation: SimulationRecord | null
+) {
+  const validations = generation.result?.validations ?? [];
+
+  return [
+    "HELVARIX ADVANCED FABRICATOR",
+    "VALIDATION AND EXPORT REPORT",
+    "",
+    `Project: ${project?.name ?? "Unknown"}`,
+    `Workspace: ${project?.workspaceLabel ?? "Unknown"}`,
+    `Generation ID: ${generation.id}`,
+    `Component: ${generation.componentName}`,
+    `Status: ${generation.status}`,
+    `Revision: ${generation.result?.revision ?? "n/a"}`,
+    `Estimated Mass: ${generation.result?.estimatedMassKg ?? "n/a"} kg`,
+    `Export State: ${generation.result?.exportState ?? "n/a"}`,
+    "",
+    "INPUT",
+    JSON.stringify(generation.input, null, 2),
+    "",
+    "VALIDATION",
+    validations.length
+      ? validations.map((item) => `[${item.severity.toUpperCase()}] ${item.title}: ${item.text}`).join("\n")
+      : "No validation messages available.",
+    "",
+    "SIMULATION",
+    simulation ? JSON.stringify(simulation, null, 2) : "No simulation record available."
+  ].join("\n");
+}
+
+function buildPreviewStl(generation: GenerationSummary) {
+  const radius = Math.max(1, generation.input.baseDiameterMm / 2);
+  const height = Math.max(1, generation.input.lengthMm);
+  const name = safeFileName(generation.componentName || "haf-part");
+
+  return [
+    `solid ${name}`,
+    `  facet normal 0 0 1`,
+    `    outer loop`,
+    `      vertex 0 0 ${height}`,
+    `      vertex ${radius} 0 0`,
+    `      vertex 0 ${radius} 0`,
+    `    endloop`,
+    `  endfacet`,
+    `  facet normal 0 0 1`,
+    `    outer loop`,
+    `      vertex 0 0 ${height}`,
+    `      vertex 0 ${radius} 0`,
+    `      vertex ${-radius} 0 0`,
+    `    endloop`,
+    `  endfacet`,
+    `  facet normal 0 0 1`,
+    `    outer loop`,
+    `      vertex 0 0 ${height}`,
+    `      vertex ${-radius} 0 0`,
+    `      vertex 0 ${-radius} 0`,
+    `    endloop`,
+    `  endfacet`,
+    `  facet normal 0 0 1`,
+    `    outer loop`,
+    `      vertex 0 0 ${height}`,
+    `      vertex 0 ${-radius} 0`,
+    `      vertex ${radius} 0 0`,
+    `    endloop`,
+    `  endfacet`,
+    `endsolid ${name}`
+  ].join("\n");
+}
+
+function buildPlaceholderStep(generation: GenerationSummary) {
+  return [
+    "ISO-10303-21;",
+    "HEADER;",
+    `FILE_DESCRIPTION(('Helvarix preview STEP placeholder for ${generation.componentName}'),'2;1');`,
+    `FILE_NAME('${generation.componentName}.step','${new Date().toISOString()}',('Helvarix Systems'),('Helvarix Advanced Fabricator'),'HAF','HAF','');`,
+    "FILE_SCHEMA(('CONFIG_CONTROL_DESIGN'));",
+    "ENDSEC;",
+    "DATA;",
+    "/* Full STEP generation should be produced by the production geometry/export backend. */",
+    `/* Generation ID: ${generation.id} */`,
+    "ENDSEC;",
+    "END-ISO-10303-21;"
+  ].join("\n");
+}
+
+function createZip(files: Array<{ name: string; content: string }>) {
+  const encoder = new TextEncoder();
+  const localParts: Uint8Array[] = [];
+  const centralParts: Uint8Array[] = [];
+  let offset = 0;
+
+  for (const file of files) {
+    const nameBytes = encoder.encode(file.name);
+    const data = encoder.encode(file.content);
+    const crc = crc32(data);
+
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    const local = new DataView(localHeader.buffer);
+
+    local.setUint32(0, 0x04034b50, true);
+    local.setUint16(4, 20, true);
+    local.setUint16(6, 0, true);
+    local.setUint16(8, 0, true);
+    local.setUint16(10, 0, true);
+    local.setUint16(12, 0, true);
+    local.setUint32(14, crc, true);
+    local.setUint32(18, data.length, true);
+    local.setUint32(22, data.length, true);
+    local.setUint16(26, nameBytes.length, true);
+    local.setUint16(28, 0, true);
+    localHeader.set(nameBytes, 30);
+
+    localParts.push(localHeader, data);
+
+    const centralHeader = new Uint8Array(46 + nameBytes.length);
+    const central = new DataView(centralHeader.buffer);
+
+    central.setUint32(0, 0x02014b50, true);
+    central.setUint16(4, 20, true);
+    central.setUint16(6, 20, true);
+    central.setUint16(8, 0, true);
+    central.setUint16(10, 0, true);
+    central.setUint16(12, 0, true);
+    central.setUint16(14, 0, true);
+    central.setUint32(16, crc, true);
+    central.setUint32(20, data.length, true);
+    central.setUint32(24, data.length, true);
+    central.setUint16(28, nameBytes.length, true);
+    central.setUint16(30, 0, true);
+    central.setUint16(32, 0, true);
+    central.setUint16(34, 0, true);
+    central.setUint16(36, 0, true);
+    central.setUint32(38, 0, true);
+    central.setUint32(42, offset, true);
+    centralHeader.set(nameBytes, 46);
+
+    centralParts.push(centralHeader);
+    offset += localHeader.length + data.length;
+  }
+
+  const centralOffset = offset;
+  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+
+  const end = new Uint8Array(22);
+  const endView = new DataView(end.buffer);
+
+  endView.setUint32(0, 0x06054b50, true);
+  endView.setUint16(8, files.length, true);
+  endView.setUint16(10, files.length, true);
+  endView.setUint32(12, centralSize, true);
+  endView.setUint32(16, centralOffset, true);
+  endView.setUint16(20, 0, true);
+
+  return new Blob([...localParts, ...centralParts, end], { type: "application/zip" });
+}
+
+function crc32(data: Uint8Array) {
+  let crc = 0xffffffff;
+
+  for (const byte of data) {
+    crc ^= byte;
+
+    for (let index = 0; index < 8; index += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+
+  return (crc ^ 0xffffffff) >>> 0;
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
