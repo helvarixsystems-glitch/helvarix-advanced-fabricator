@@ -1,3 +1,8 @@
 name = "haf-api"
 main = "src/index.ts"
 compatibility_date = "2024-09-25"
+
+[vars]
+# Leave blank until your Render solver worker is deployed.
+# Example: HELVARIX_SOLVER_URL = "https://helvarix-solver-worker.onrender.com"
+HELVARIX_SOLVER_URL = ""
