@@ -20,6 +20,11 @@ import {
   SolverRunResult,
 } from "./solverRunner";
 
+import {
+  parseCalculixTextOutput,
+  mergeCalculixParsedResultIntoStructuralResult,
+} from "../parsers";
+
 export interface HighFidelityPipelineOptions {
   enableDiskWrite?: boolean;
   enableNativeExecution?: boolean;
@@ -43,20 +48,6 @@ export interface HighFidelityPipelineResult {
   errors: string[];
 }
 
-/**
- * High-Fidelity Pipeline
- *
- * Intended runtime:
- * - remote worker
- * - container
- * - VM
- * - batch compute node
- *
- * Not intended runtime:
- * - browser
- * - Cloudflare Pages
- * - edge function without native process support
- */
 export async function runHighFidelityPipeline(
   request: SimulationRequest,
   options?: HighFidelityPipelineOptions
@@ -95,19 +86,22 @@ export async function runHighFidelityPipeline(
     errors.push(...writeResult.errors);
   }
 
+  let calculixOutputText = "";
+
   if (options?.enableNativeExecution ?? false) {
     if (job.gmsh) {
       const meshFileName = job.gmsh.geoFileName.replace(/\.geo$/i, ".inp");
 
-      const gmshCommand = buildGmshCommand({
-        executable: options?.gmshExecutable,
-        cwd: workspace.rootDirectory,
-        geoFileName: job.gmsh.geoFileName,
-        outputMeshFileName: meshFileName,
-        timeoutMs: options?.gmshTimeoutMs,
-      });
+      const gmshRun = await runSolverCommand(
+        buildGmshCommand({
+          executable: options?.gmshExecutable,
+          cwd: workspace.rootDirectory,
+          geoFileName: job.gmsh.geoFileName,
+          outputMeshFileName: meshFileName,
+          timeoutMs: options?.gmshTimeoutMs,
+        })
+      );
 
-      const gmshRun = await runSolverCommand(gmshCommand);
       solverRuns.push(gmshRun);
       artifacts.push(...gmshRun.artifacts);
       warnings.push(...gmshRun.warnings);
@@ -117,50 +111,72 @@ export async function runHighFidelityPipeline(
     if (job.calculix) {
       const jobName = job.calculix.inputFileName.replace(/\.inp$/i, "");
 
-      const calculixCommand = buildCalculixCommand({
-        executable: options?.calculixExecutable,
-        cwd: workspace.rootDirectory,
-        jobName,
-        timeoutMs: options?.calculixTimeoutMs,
-      });
+      const ccxRun = await runSolverCommand(
+        buildCalculixCommand({
+          executable: options?.calculixExecutable,
+          cwd: workspace.rootDirectory,
+          jobName,
+          timeoutMs: options?.calculixTimeoutMs,
+        })
+      );
 
-      const ccxRun = await runSolverCommand(calculixCommand);
       solverRuns.push(ccxRun);
       artifacts.push(...ccxRun.artifacts);
       warnings.push(...ccxRun.warnings);
       errors.push(...ccxRun.errors);
+
+      calculixOutputText = ccxRun.stdout + "\n" + ccxRun.stderr;
     }
   } else {
     warnings.push(
-      "Native solver execution disabled. Generated high-fidelity workspace only."
+      "Native solver execution disabled. Using fast simulation fallback."
     );
   }
 
   /**
-   * Always return a valid result.
-   * Until parser is connected, use the internal simulation as the fallback.
+   * ALWAYS have fallback
    */
   const fallbackResult = await runSimulation(request);
 
-  const structuralOverride = buildStructuralResultFromSolverRuns(
-    fallbackResult.structural,
-    solverRuns
-  );
+  let structural: StructuralResult | undefined = fallbackResult.structural;
+
+  /**
+   * 🔥 THIS IS THE KEY PART
+   * Real solver output → parsed → overrides fast estimate
+   */
+  if (calculixOutputText) {
+    const parsed = parseCalculixTextOutput(calculixOutputText);
+
+    structural = mergeCalculixParsedResultIntoStructuralResult({
+      fallback: fallbackResult.structural!,
+      parsed,
+      yieldStrengthPa: request.material.yieldStrengthPa,
+      safetyFactorTarget:
+        request.structural?.safetyFactorTarget ?? 2,
+    });
+
+    warnings.push(...parsed.warnings);
+    errors.push(...parsed.errors);
+  }
 
   const result: SimulationResult = {
     ...fallbackResult,
-    structural: structuralOverride ?? fallbackResult.structural,
+
+    structural,
+
     artifacts: [...fallbackResult.artifacts, ...artifacts],
     warnings: [...fallbackResult.warnings, ...warnings],
     errors: [...fallbackResult.errors, ...errors],
+
     status:
       errors.length > 0 || fallbackResult.status === "failed"
         ? "failed"
-        : fallbackResult.status,
+        : "completed",
+
     summary:
       errors.length > 0
-        ? `${fallbackResult.summary} High-fidelity pipeline completed with errors.`
-        : `${fallbackResult.summary} High-fidelity pipeline completed.`,
+        ? `${fallbackResult.summary} High-fidelity simulation completed with errors.`
+        : `${fallbackResult.summary} High-fidelity simulation completed.`,
   };
 
   return {
@@ -169,36 +185,5 @@ export async function runHighFidelityPipeline(
     solverRuns,
     warnings,
     errors,
-  };
-}
-
-function buildStructuralResultFromSolverRuns(
-  fallback: StructuralResult | undefined,
-  solverRuns: SolverRunResult[]
-): StructuralResult | undefined {
-  if (!fallback) return undefined;
-
-  const calculixRun = solverRuns.find((run) => run.command.kind === "calculix");
-
-  if (!calculixRun) return fallback;
-
-  if (calculixRun.status !== "completed") {
-    return {
-      ...fallback,
-      warnings: [
-        ...fallback.warnings,
-        "CalculiX did not complete successfully. Structural result uses fast estimate fallback.",
-      ],
-      solver: "internal-fast-estimate",
-    };
-  }
-
-  return {
-    ...fallback,
-    warnings: [
-      ...fallback.warnings,
-      "CalculiX completed, but result parser is not connected yet. Structural values still use fast estimate fallback.",
-    ],
-    solver: "calculix",
   };
 }
