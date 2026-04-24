@@ -18,22 +18,18 @@ import { GraphPaperRoom, type ViewerMode } from "@haf/viewer";
 import {
   appName,
   formatTimestamp,
+  type BellNozzleRequirements,
+  type ComponentFamily,
   type CreditBalance,
   type GenerationInput,
   type GenerationSummary,
-  type ProjectSummary
+  type ProjectSummary,
+  type StructuralBracketRequirements
 } from "@haf/shared";
 import { componentRegistry } from "@haf/component-registry";
 import "./styles.css";
 
 const API_BASE = "https://helvarix-advanced-fabricator.helvarixsystems.workers.dev";
-
-const MATERIAL_OPTIONS = [
-  { label: "PEEK-CF", value: "PEEK-CF" },
-  { label: "AlSi10Mg", value: "AlSi10Mg" },
-  { label: "Ti-6Al-4V", value: "Ti-6Al-4V" },
-  { label: "Inconel 718", value: "Inconel 718" }
-];
 
 const EXPORT_OPTIONS = [
   { label: "Complete Package", value: "package" },
@@ -79,20 +75,14 @@ function App() {
   const [submittingIteration, setSubmittingIteration] = React.useState(false);
   const [submittingExport, setSubmittingExport] = React.useState(false);
 
-  const [selectedFamily, setSelectedFamily] = React.useState("nosecone");
+  const [selectedFamily, setSelectedFamily] = React.useState<ComponentFamily>(
+    componentRegistry[0].key
+  );
   const [exportFormat, setExportFormat] = React.useState<ExportFormat>("package");
   const [viewerMode, setViewerMode] = React.useState<ViewerMode>("concept");
   const [rightPanelTab, setRightPanelTab] = React.useState<RightPanelTab>("summary");
 
-  const [form, setForm] = React.useState<GenerationInput>({
-    componentFamily: "nosecone",
-    componentName: "HAF-NC-01",
-    lengthMm: 1200,
-    baseDiameterMm: 320,
-    wallThicknessMm: 3.4,
-    material: "PEEK-CF",
-    targetMassKg: 8.6
-  });
+  const [form, setForm] = React.useState<GenerationInput>(componentRegistry[0].defaultInput);
 
   const activeProject = React.useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? null,
@@ -119,14 +109,7 @@ function App() {
   React.useEffect(() => {
     const registryItem = componentRegistry.find((item) => item.key === selectedFamily);
     if (!registryItem) return;
-
-    setForm((prev) => ({
-      ...registryItem.defaultInput,
-      componentName:
-        prev.componentFamily === registryItem.defaultInput.componentFamily
-          ? prev.componentName
-          : registryItem.defaultInput.componentName
-    }));
+    setForm(registryItem.defaultInput);
   }, [selectedFamily]);
 
   React.useEffect(() => {
@@ -372,17 +355,9 @@ function App() {
           )
         );
       } else if (exportFormat === "stl") {
-        downloadBlob(
-          `${packageName}.stl`,
-          "model/stl",
-          buildPreviewStl(displayGeneration)
-        );
+        downloadBlob(`${packageName}.stl`, "model/stl", buildPreviewStl(displayGeneration));
       } else {
-        downloadBlob(
-          `${packageName}.step`,
-          "text/plain",
-          buildPlaceholderStep(displayGeneration)
-        );
+        downloadBlob(`${packageName}.step`, "text/plain", buildPlaceholderStep(displayGeneration));
       }
     } finally {
       setSubmittingExport(false);
@@ -413,11 +388,39 @@ function App() {
     return null;
   }
 
+  function updateStructuralRequirements(
+    updater: (requirements: StructuralBracketRequirements) => StructuralBracketRequirements
+  ) {
+    setForm((current) => {
+      if (current.componentFamily === "bell-nozzle") return current;
+
+      return {
+        ...current,
+        requirements: updater(current.requirements)
+      };
+    });
+  }
+
+  function updateBellRequirements(
+    updater: (requirements: BellNozzleRequirements) => BellNozzleRequirements
+  ) {
+    setForm((current) => {
+      if (current.componentFamily !== "bell-nozzle") return current;
+
+      return {
+        ...current,
+        requirements: updater(current.requirements)
+      };
+    });
+  }
+
   function statusTone(status?: string) {
     if (status === "completed") return "success";
     if (status === "failed") return "warning";
     return "neutral";
   }
+
+  const componentName = getInputComponentName(form);
 
   return (
     <AppShell>
@@ -438,14 +441,14 @@ function App() {
 
         <main className="workspace-grid">
           <WorkspacePanel
-            title="Parameters"
-            subtitle="Define printable geometry constraints for additive manufacturing."
+            title="Requirements"
+            subtitle="Tell the system what the object must do. The engine derives geometry."
             footer={
               <BlackButton
                 onClick={handleGenerateConcept}
                 disabled={submittingGeneration || loadingWorkspace}
               >
-                {submittingGeneration ? "Submitting..." : "Generate Concept"}
+                {submittingGeneration ? "Generating..." : "Generate Design"}
               </BlackButton>
             }
           >
@@ -461,7 +464,7 @@ function App() {
                       }))
                     : [
                         {
-                          label: "Lunar Nosecone Study · Fabrication Bay 01",
+                          label: "Requirements-First Demo · Fabrication Bay 01",
                           value: "proj_0001"
                         }
                       ]
@@ -472,7 +475,7 @@ function App() {
                 label="Project Family"
                 value={activeProject?.componentFamily ?? form.componentFamily}
               />
-              <MetricRow label="Manufacturing Mode" value="Additive / 3D Printing" />
+              <MetricRow label="Design Mode" value="Requirement-Derived Geometry" />
             </SidebarSection>
 
             <SidebarSection title="Component">
@@ -483,90 +486,478 @@ function App() {
                   label: item.label,
                   value: item.key
                 }))}
-                onChange={(value) => setSelectedFamily(value)}
+                onChange={(value) => setSelectedFamily(value as ComponentFamily)}
               />
               <InputField
                 label="Component Name"
-                value={form.componentName}
-                onChange={(value) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    componentName: value
-                  }))
-                }
+                value={componentName}
+                onChange={(value) => {
+                  if (form.componentFamily === "bell-nozzle") {
+                    updateBellRequirements((requirements) => ({
+                      ...requirements,
+                      componentName: value
+                    }));
+                  } else {
+                    updateStructuralRequirements((requirements) => ({
+                      ...requirements,
+                      componentName: value
+                    }));
+                  }
+                }}
               />
             </SidebarSection>
 
-            <SidebarSection title="Dimensions">
-              <InputField
-                label="Length (mm)"
-                type="number"
-                value={form.lengthMm}
-                onChange={(value) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    lengthMm: Number(value)
-                  }))
-                }
-              />
-              <InputField
-                label="Base Diameter (mm)"
-                type="number"
-                value={form.baseDiameterMm}
-                onChange={(value) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    baseDiameterMm: Number(value)
-                  }))
-                }
-              />
-              <InputField
-                label="Wall Thickness (mm)"
-                type="number"
-                value={form.wallThicknessMm}
-                onChange={(value) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    wallThicknessMm: Number(value)
-                  }))
-                }
-              />
-            </SidebarSection>
+            {form.componentFamily === "bell-nozzle" ? (
+              <>
+                <SidebarSection title="Performance Requirement">
+                  <InputField
+                    label="Target Thrust (N)"
+                    type="number"
+                    value={form.requirements.performance.targetThrustN}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        performance: {
+                          ...requirements.performance,
+                          targetThrustN: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Burn Duration (sec)"
+                    type="number"
+                    value={form.requirements.performance.burnDurationSec}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        performance: {
+                          ...requirements.performance,
+                          burnDurationSec: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Chamber Pressure (bar)"
+                    type="number"
+                    value={form.requirements.performance.chamberPressureBar ?? 20}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        performance: {
+                          ...requirements.performance,
+                          chamberPressureBar: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Ambient Pressure (Pa)"
+                    type="number"
+                    value={form.requirements.performance.ambientPressurePa}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        performance: {
+                          ...requirements.performance,
+                          ambientPressurePa: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                </SidebarSection>
 
-            <SidebarSection title="Material">
-              <SelectField
-                label="Build Material"
-                defaultValue={form.material}
-                options={MATERIAL_OPTIONS}
-                onChange={(value) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    material: value
-                  }))
-                }
-              />
-              <InputField
-                label="Target Mass (kg)"
-                type="number"
-                value={form.targetMassKg}
-                onChange={(value) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    targetMassKg: Number(value)
-                  }))
-                }
-              />
-            </SidebarSection>
+                <SidebarSection title="Propellant / Thermal">
+                  <SelectField
+                    label="Oxidizer"
+                    defaultValue={form.requirements.propellant.oxidizer}
+                    options={[
+                      { label: "LOX", value: "LOX" },
+                      { label: "N2O", value: "N2O" },
+                      { label: "H2O2", value: "H2O2" }
+                    ]}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        propellant: {
+                          ...requirements.propellant,
+                          oxidizer: value as BellNozzleRequirements["propellant"]["oxidizer"]
+                        }
+                      }))
+                    }
+                  />
+                  <SelectField
+                    label="Fuel"
+                    defaultValue={form.requirements.propellant.fuel}
+                    options={[
+                      { label: "RP-1", value: "RP1" },
+                      { label: "Methane", value: "CH4" },
+                      { label: "Hydrogen", value: "H2" },
+                      { label: "HTPB", value: "HTPB" }
+                    ]}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        propellant: {
+                          ...requirements.propellant,
+                          fuel: value as BellNozzleRequirements["propellant"]["fuel"]
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Mixture Ratio"
+                    type="number"
+                    value={form.requirements.propellant.mixtureRatio ?? 2.6}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        propellant: {
+                          ...requirements.propellant,
+                          mixtureRatio: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <SelectField
+                    label="Cooling Mode"
+                    defaultValue={form.requirements.thermal.coolingMode}
+                    options={[
+                      { label: "Ablative", value: "ablative" },
+                      { label: "Regenerative", value: "regenerative" },
+                      { label: "Radiative", value: "radiative" }
+                    ]}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        thermal: {
+                          ...requirements.thermal,
+                          coolingMode: value as BellNozzleRequirements["thermal"]["coolingMode"]
+                        }
+                      }))
+                    }
+                  />
+                </SidebarSection>
 
-            <SidebarSection title="Fabrication Profile">
+                <SidebarSection title="Envelope / Manufacturing">
+                  <InputField
+                    label="Max Length (mm)"
+                    type="number"
+                    value={form.requirements.envelope.maxLengthMm}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        envelope: {
+                          ...requirements.envelope,
+                          maxLengthMm: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Max Exit Diameter (mm)"
+                    type="number"
+                    value={form.requirements.envelope.maxExitDiameterMm}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        envelope: {
+                          ...requirements.envelope,
+                          maxExitDiameterMm: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Minimum Wall (mm)"
+                    type="number"
+                    value={form.requirements.manufacturing.minWallThicknessMm}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        manufacturing: {
+                          ...requirements.manufacturing,
+                          minWallThicknessMm: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Safety Factor"
+                    type="number"
+                    value={form.requirements.safetyFactor}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        safetyFactor: Number(value)
+                      }))
+                    }
+                  />
+                </SidebarSection>
+
+                <SidebarSection title="Optimization">
+                  <SelectField
+                    label="Priority"
+                    defaultValue={form.requirements.objectives.priority}
+                    options={[
+                      { label: "Balanced", value: "balanced" },
+                      { label: "Efficiency", value: "efficiency" },
+                      { label: "Compactness", value: "compactness" },
+                      { label: "Thermal Margin", value: "thermal-margin" }
+                    ]}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        objectives: {
+                          ...requirements.objectives,
+                          priority: value as BellNozzleRequirements["objectives"]["priority"]
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Target Mass (kg)"
+                    type="number"
+                    value={form.requirements.objectives.targetMassKg ?? 3.5}
+                    onChange={(value) =>
+                      updateBellRequirements((requirements) => ({
+                        ...requirements,
+                        objectives: {
+                          ...requirements.objectives,
+                          targetMassKg: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                </SidebarSection>
+              </>
+            ) : (
+              <>
+                <SidebarSection title="Load Requirement">
+                  <InputField
+                    label="Required Load (N)"
+                    type="number"
+                    value={form.requirements.loadCase.forceN}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        loadCase: {
+                          ...requirements.loadCase,
+                          forceN: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <SelectField
+                    label="Load Direction"
+                    defaultValue={form.requirements.loadCase.direction}
+                    options={[
+                      { label: "Vertical", value: "vertical" },
+                      { label: "Lateral", value: "lateral" },
+                      { label: "Multi-Axis", value: "multi-axis" }
+                    ]}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        loadCase: {
+                          ...requirements.loadCase,
+                          direction: value as StructuralBracketRequirements["loadCase"]["direction"]
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Vibration Requirement (Hz)"
+                    type="number"
+                    value={form.requirements.loadCase.vibrationHz ?? 0}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        loadCase: {
+                          ...requirements.loadCase,
+                          vibrationHz: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Safety Factor"
+                    type="number"
+                    value={form.requirements.safetyFactor}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        safetyFactor: Number(value)
+                      }))
+                    }
+                  />
+                </SidebarSection>
+
+                <SidebarSection title="Mounting Interface">
+                  <InputField
+                    label="Bolt Count"
+                    type="number"
+                    value={form.requirements.mounting.boltCount}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        mounting: {
+                          ...requirements.mounting,
+                          boltCount: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Bolt Diameter (mm)"
+                    type="number"
+                    value={form.requirements.mounting.boltDiameterMm}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        mounting: {
+                          ...requirements.mounting,
+                          boltDiameterMm: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Bolt Spacing (mm)"
+                    type="number"
+                    value={form.requirements.mounting.spacingMm}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        mounting: {
+                          ...requirements.mounting,
+                          spacingMm: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                </SidebarSection>
+
+                <SidebarSection title="Envelope">
+                  <InputField
+                    label="Max Width (mm)"
+                    type="number"
+                    value={form.requirements.envelope.maxWidthMm}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        envelope: {
+                          ...requirements.envelope,
+                          maxWidthMm: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Max Height (mm)"
+                    type="number"
+                    value={form.requirements.envelope.maxHeightMm}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        envelope: {
+                          ...requirements.envelope,
+                          maxHeightMm: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Max Depth (mm)"
+                    type="number"
+                    value={form.requirements.envelope.maxDepthMm}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        envelope: {
+                          ...requirements.envelope,
+                          maxDepthMm: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                </SidebarSection>
+
+                <SidebarSection title="Manufacturing / Optimization">
+                  <InputField
+                    label="Minimum Wall (mm)"
+                    type="number"
+                    value={form.requirements.manufacturing.minWallThicknessMm}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        manufacturing: {
+                          ...requirements.manufacturing,
+                          minWallThicknessMm: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Max Overhang (deg)"
+                    type="number"
+                    value={form.requirements.manufacturing.maxOverhangDeg}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        manufacturing: {
+                          ...requirements.manufacturing,
+                          maxOverhangDeg: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                  <SelectField
+                    label="Priority"
+                    defaultValue={form.requirements.objectives.priority}
+                    options={[
+                      { label: "Balanced", value: "balanced" },
+                      { label: "Lightweight", value: "lightweight" },
+                      { label: "Stiffness", value: "stiffness" }
+                    ]}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        objectives: {
+                          ...requirements.objectives,
+                          priority: value as StructuralBracketRequirements["objectives"]["priority"]
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Target Mass (kg)"
+                    type="number"
+                    value={form.requirements.objectives.targetMassKg ?? 0}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        objectives: {
+                          ...requirements.objectives,
+                          targetMassKg: Number(value)
+                        }
+                      }))
+                    }
+                  />
+                </SidebarSection>
+              </>
+            )}
+
+            <SidebarSection title="Resolver Profile">
               <MetricRow label="Profile" value={selectedMeta.label} />
-              <MetricRow label="Mode" value="Concept Geometry" />
+              <MetricRow label="Mode" value="Requirements → Candidate Search" />
               <MetricRow
                 label="Printable State"
                 value={
                   displayGeneration?.status === "completed"
-                    ? "Validated Concept"
-                    : "Pending Generation"
+                    ? "Derived Candidate Ready"
+                    : "Awaiting Generation"
                 }
               />
             </SidebarSection>
@@ -594,7 +985,7 @@ function App() {
             </div>
 
             <GraphPaperRoom
-              title={displayGeneration?.componentName ?? form.componentName}
+              title={displayGeneration?.componentName ?? componentName}
               geometry={displayGeneration?.result?.geometry}
               mode={viewerMode}
               status={displayGeneration?.status ?? "idle"}
@@ -611,7 +1002,7 @@ function App() {
 
           <WorkspacePanel
             title="Results"
-            subtitle="Tabbed validation, lineage, simulation, and export status."
+            subtitle="Candidate search, validation, simulation, and export status."
             footer={getRightPanelFooter()}
           >
             <div className="right-panel-tabs" role="tablist" aria-label="Results panel tabs">
@@ -636,12 +1027,16 @@ function App() {
                     <MetricRow label="Revision" value={displayGeneration?.result?.revision ?? "—"} />
                     <MetricRow label="Status" value={displayGeneration?.status ?? "—"} />
                     <MetricRow
-                      label="Export State"
-                      value={displayGeneration?.result?.exportState ?? "—"}
+                      label="Candidates"
+                      value={
+                        displayGeneration?.result
+                          ? `${displayGeneration.result.candidatesAccepted}/${displayGeneration.result.candidatesEvaluated} accepted`
+                          : "—"
+                      }
                     />
                     <MetricRow
-                      label="Token Cost"
-                      value={displayGeneration ? String(displayGeneration.tokenCost) : "—"}
+                      label="Material"
+                      value={displayGeneration?.result?.derived.material ?? "—"}
                     />
                     <MetricRow
                       label="Estimated Mass"
@@ -652,8 +1047,43 @@ function App() {
                       }
                     />
                     <MetricRow
-                      label="Parent Run"
-                      value={displayGeneration?.parentGenerationId ?? "Root Concept"}
+                      label="Token Cost"
+                      value={displayGeneration ? String(displayGeneration.tokenCost) : "—"}
+                    />
+                  </SidebarSection>
+
+                  <SidebarSection title="Derived Geometry">
+                    <MetricRow
+                      label="Length"
+                      value={
+                        displayGeneration?.result?.derived
+                          ? `${displayGeneration.result.derived.lengthMm} mm`
+                          : "—"
+                      }
+                    />
+                    <MetricRow
+                      label="Width"
+                      value={
+                        displayGeneration?.result?.derived
+                          ? `${displayGeneration.result.derived.widthMm} mm`
+                          : "—"
+                      }
+                    />
+                    <MetricRow
+                      label="Height"
+                      value={
+                        displayGeneration?.result?.derived
+                          ? `${displayGeneration.result.derived.heightMm} mm`
+                          : "—"
+                      }
+                    />
+                    <MetricRow
+                      label="Wall"
+                      value={
+                        displayGeneration?.result?.derived
+                          ? `${displayGeneration.result.derived.wallThicknessMm} mm`
+                          : "—"
+                      }
                     />
                   </SidebarSection>
 
@@ -665,8 +1095,8 @@ function App() {
                     <div className="message message-success">
                       <div className="message-title">Workflow Alignment</div>
                       <div className="message-body">
-                        Generate constraint-filtered geometry, validate manufacturability, run
-                        simulation, then export the complete artifact package.
+                        Enter performance requirements, generate candidates, validate constraints,
+                        run simulation, then export the complete package.
                       </div>
                     </div>
                   </SidebarSection>
@@ -695,7 +1125,8 @@ function App() {
                     <div className="message">
                       <div className="message-title">Awaiting Generation</div>
                       <div className="message-body">
-                        Submit a concept run to generate printable geometry and validation output.
+                        Submit a requirements-first generation run to derive geometry and validation
+                        output.
                       </div>
                     </div>
                   )}
@@ -803,6 +1234,10 @@ function App() {
   );
 }
 
+function getInputComponentName(input: GenerationInput) {
+  return input.requirements.componentName;
+}
+
 function safeFileName(value: string) {
   return value.replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase();
 }
@@ -834,30 +1269,15 @@ async function downloadCompletePackage(args: {
   const stl = buildPreviewStl(generation);
 
   const files = [
-    {
-      name: "geometry/part-preview.stl",
-      content: stl
-    },
-    {
-      name: "reports/validation-report.txt",
-      content: report
-    },
-    {
-      name: "reports/generation.json",
-      content: JSON.stringify(generation, null, 2)
-    },
-    {
-      name: "reports/project.json",
-      content: JSON.stringify(project, null, 2)
-    },
+    { name: "geometry/part-preview.stl", content: stl },
+    { name: "reports/validation-report.txt", content: report },
+    { name: "reports/generation.json", content: JSON.stringify(generation, null, 2) },
+    { name: "reports/project.json", content: JSON.stringify(project, null, 2) },
     {
       name: "simulation/simulation.json",
       content: JSON.stringify(simulation ?? { status: "not-run" }, null, 2)
     },
-    {
-      name: "export/export-record.json",
-      content: JSON.stringify(queuedExport, null, 2)
-    },
+    { name: "export/export-record.json", content: JSON.stringify(queuedExport, null, 2) },
     {
       name: "manifest.json",
       content: JSON.stringify(
@@ -891,26 +1311,32 @@ function buildReportText(
   simulation: SimulationRecord | null
 ) {
   const validations = generation.result?.validations ?? [];
+  const derived = generation.result?.derived;
 
   return [
     "HELVARIX ADVANCED FABRICATOR",
-    "VALIDATION AND EXPORT REPORT",
+    "REQUIREMENTS-FIRST VALIDATION AND EXPORT REPORT",
     "",
     `Project: ${project?.name ?? "Unknown"}`,
     `Workspace: ${project?.workspaceLabel ?? "Unknown"}`,
     `Generation ID: ${generation.id}`,
     `Component: ${generation.componentName}`,
+    `Family: ${generation.input.componentFamily}`,
     `Status: ${generation.status}`,
     `Revision: ${generation.result?.revision ?? "n/a"}`,
     `Estimated Mass: ${generation.result?.estimatedMassKg ?? "n/a"} kg`,
-    `Export State: ${generation.result?.exportState ?? "n/a"}`,
     "",
-    "INPUT",
+    "DERIVED GEOMETRY",
+    derived ? JSON.stringify(derived, null, 2) : "No derived geometry available.",
+    "",
+    "INPUT REQUIREMENTS",
     JSON.stringify(generation.input, null, 2),
     "",
     "VALIDATION",
     validations.length
-      ? validations.map((item) => `[${item.severity.toUpperCase()}] ${item.title}: ${item.text}`).join("\n")
+      ? validations
+          .map((item) => `[${item.severity.toUpperCase()}] ${item.title}: ${item.text}`)
+          .join("\n")
       : "No validation messages available.",
     "",
     "SIMULATION",
@@ -919,41 +1345,44 @@ function buildReportText(
 }
 
 function buildPreviewStl(generation: GenerationSummary) {
-  const radius = Math.max(1, generation.input.baseDiameterMm / 2);
-  const height = Math.max(1, generation.input.lengthMm);
+  const derived = generation.result?.derived;
   const name = safeFileName(generation.componentName || "haf-part");
+
+  const width = Math.max(1, derived?.widthMm ?? 100);
+  const height = Math.max(1, derived?.heightMm ?? 100);
+  const length = Math.max(1, derived?.lengthMm ?? 100);
+
+  const x = width / 2;
+  const y = height / 2;
+  const z = length;
 
   return [
     `solid ${name}`,
-    `  facet normal 0 0 1`,
-    `    outer loop`,
-    `      vertex 0 0 ${height}`,
-    `      vertex ${radius} 0 0`,
-    `      vertex 0 ${radius} 0`,
-    `    endloop`,
-    `  endfacet`,
-    `  facet normal 0 0 1`,
-    `    outer loop`,
-    `      vertex 0 0 ${height}`,
-    `      vertex 0 ${radius} 0`,
-    `      vertex ${-radius} 0 0`,
-    `    endloop`,
-    `  endfacet`,
-    `  facet normal 0 0 1`,
-    `    outer loop`,
-    `      vertex 0 0 ${height}`,
-    `      vertex ${-radius} 0 0`,
-    `      vertex 0 ${-radius} 0`,
-    `    endloop`,
-    `  endfacet`,
-    `  facet normal 0 0 1`,
-    `    outer loop`,
-    `      vertex 0 0 ${height}`,
-    `      vertex 0 ${-radius} 0`,
-    `      vertex ${radius} 0 0`,
-    `    endloop`,
-    `  endfacet`,
+    facet([[-x, -y, 0], [x, -y, 0], [x, y, 0]]),
+    facet([[-x, -y, 0], [x, y, 0], [-x, y, 0]]),
+    facet([[-x, -y, z], [x, y, z], [x, -y, z]]),
+    facet([[-x, -y, z], [-x, y, z], [x, y, z]]),
+    facet([[-x, -y, 0], [-x, -y, z], [x, -y, z]]),
+    facet([[-x, -y, 0], [x, -y, z], [x, -y, 0]]),
+    facet([[x, -y, 0], [x, -y, z], [x, y, z]]),
+    facet([[x, -y, 0], [x, y, z], [x, y, 0]]),
+    facet([[x, y, 0], [x, y, z], [-x, y, z]]),
+    facet([[x, y, 0], [-x, y, z], [-x, y, 0]]),
+    facet([[-x, y, 0], [-x, y, z], [-x, -y, z]]),
+    facet([[-x, y, 0], [-x, -y, z], [-x, -y, 0]]),
     `endsolid ${name}`
+  ].join("\n");
+}
+
+function facet(vertices: number[][]) {
+  return [
+    "  facet normal 0 0 1",
+    "    outer loop",
+    `      vertex ${vertices[0][0]} ${vertices[0][1]} ${vertices[0][2]}`,
+    `      vertex ${vertices[1][0]} ${vertices[1][1]} ${vertices[1][2]}`,
+    `      vertex ${vertices[2][0]} ${vertices[2][1]} ${vertices[2][2]}`,
+    "    endloop",
+    "  endfacet"
   ].join("\n");
 }
 
@@ -961,7 +1390,7 @@ function buildPlaceholderStep(generation: GenerationSummary) {
   return [
     "ISO-10303-21;",
     "HEADER;",
-    `FILE_DESCRIPTION(('Helvarix preview STEP placeholder for ${generation.componentName}'),'2;1');`,
+    `FILE_DESCRIPTION(('Helvarix derived STEP placeholder for ${generation.componentName}'),'2;1');`,
     `FILE_NAME('${generation.componentName}.step','${new Date().toISOString()}',('Helvarix Systems'),('Helvarix Advanced Fabricator'),'HAF','HAF','');`,
     "FILE_SCHEMA(('CONFIG_CONTROL_DESIGN'));",
     "ENDSEC;",
