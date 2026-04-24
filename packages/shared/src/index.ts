@@ -14,31 +14,26 @@ export type ComponentFamily =
 // ==============================
 
 export type StructuralBracketRequirements = {
-  // What the part must do
   loadCase: {
-    forceN: number;              // required load support
+    forceN: number;
     direction: "vertical" | "lateral" | "multi-axis";
-    vibrationHz?: number;        // optional vibration requirement
+    vibrationHz?: number;
   };
 
-  // How safe it must be
   safetyFactor: number;
 
-  // Mounting constraints
   mounting: {
     boltCount: number;
     boltDiameterMm: number;
     spacingMm: number;
   };
 
-  // Envelope constraints
   envelope: {
     maxWidthMm: number;
     maxHeightMm: number;
     maxDepthMm: number;
   };
 
-  // Manufacturing constraints
   manufacturing: {
     process: "additive" | "machined";
     minWallThicknessMm: number;
@@ -46,7 +41,6 @@ export type StructuralBracketRequirements = {
     supportAllowed: boolean;
   };
 
-  // Optimization targets
   objectives: {
     targetMassKg?: number;
     priority: "lightweight" | "stiffness" | "balanced";
@@ -96,4 +90,20 @@ export type GeometryPreview = {
   lengthMm: number;
   wallThicknessMm: number;
   notes?: string[];
+};
+
+// ==============================
+// SHARED UI THEME (FIXES BUILD)
+// ==============================
+
+export const theme = {
+  text: "#111111",
+  muted: "#667085",
+  border: "rgba(0, 0, 0, 0.12)",
+  borderStrong: "rgba(0, 0, 0, 0.28)",
+  panel: "rgba(255, 255, 255, 0.86)",
+  panelSolid: "#ffffff",
+  grid: "rgba(0, 0, 0, 0.055)",
+  gridFine: "rgba(0, 0, 0, 0.035)",
+  black: "#101010"
 };
