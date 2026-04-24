@@ -1,6 +1,50 @@
 import { z } from "zod";
 
-const familySchema = z.enum(["nosecone", "shell", "rover-arm", "grid-fin"]);
+const familySchema = z.enum([
+  "structural-bracket",
+  "nosecone",
+  "shell",
+  "rover-arm",
+  "grid-fin"
+]);
+
+const loadDirectionSchema = z.enum(["vertical", "lateral", "multi-axis"]);
+const manufacturingProcessSchema = z.enum(["additive", "machined"]);
+const optimizationPrioritySchema = z.enum(["lightweight", "stiffness", "balanced"]);
+
+const structuralBracketRequirementsSchema = z.object({
+  loadCase: z.object({
+    forceN: z.coerce.number().positive(),
+    direction: loadDirectionSchema,
+    vibrationHz: z.coerce.number().positive().optional()
+  }),
+
+  safetyFactor: z.coerce.number().min(1).max(5),
+
+  mounting: z.object({
+    boltCount: z.coerce.number().int().min(2).max(12),
+    boltDiameterMm: z.coerce.number().positive(),
+    spacingMm: z.coerce.number().positive()
+  }),
+
+  envelope: z.object({
+    maxWidthMm: z.coerce.number().positive(),
+    maxHeightMm: z.coerce.number().positive(),
+    maxDepthMm: z.coerce.number().positive()
+  }),
+
+  manufacturing: z.object({
+    process: manufacturingProcessSchema,
+    minWallThicknessMm: z.coerce.number().positive(),
+    maxOverhangDeg: z.coerce.number().min(15).max(75),
+    supportAllowed: z.boolean()
+  }),
+
+  objectives: z.object({
+    targetMassKg: z.coerce.number().positive().optional(),
+    priority: optimizationPrioritySchema
+  })
+});
 
 export const projectSchema = z.object({
   name: z.string().min(2),
@@ -10,12 +54,7 @@ export const projectSchema = z.object({
 
 export const generationInputSchema = z.object({
   componentFamily: familySchema,
-  componentName: z.string().min(2),
-  lengthMm: z.coerce.number().positive(),
-  baseDiameterMm: z.coerce.number().positive(),
-  wallThicknessMm: z.coerce.number().positive(),
-  material: z.string().min(2),
-  targetMassKg: z.coerce.number().positive()
+  requirements: structuralBracketRequirementsSchema
 });
 
 export const createGenerationSchema = z.object({
@@ -32,7 +71,7 @@ export const createIterationSchema = z.object({
 
 export const queueExportSchema = z.object({
   generationId: z.string().min(2),
-  format: z.enum(["stl", "step", "json"]).default("stl")
+  format: z.enum(["stl", "step", "json", "package"]).default("stl")
 });
 
 export type ProjectInput = z.infer<typeof projectSchema>;
