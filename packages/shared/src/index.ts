@@ -4,20 +4,24 @@
 
 export type ComponentFamily =
   | "structural-bracket"
-  | "nosecone"
-  | "shell"
+  | "bell-nozzle"
+  | "pressure-vessel"
   | "rover-arm"
   | "grid-fin";
 
+export type ValidationSeverity = "success" | "warning" | "error";
+
+export type ValidationMessage = {
+  severity: ValidationSeverity;
+  title: string;
+  text: string;
+};
+
 // ==============================
-// APP METADATA (FIX BUILD)
+// APP METADATA
 // ==============================
 
 export const appName = "Helvarix Advanced Fabricator";
-
-// ==============================
-// UTILITIES (FIX BUILD)
-// ==============================
 
 export function formatTimestamp(value: string | number | Date) {
   try {
@@ -28,7 +32,7 @@ export function formatTimestamp(value: string | number | Date) {
 }
 
 // ==============================
-// CREDIT MODEL (FIX BUILD)
+// PROJECT / CREDIT / EXPORT TYPES
 // ==============================
 
 export type CreditBalance = {
@@ -36,14 +40,39 @@ export type CreditBalance = {
   reserved: number;
 };
 
+export type ProjectSummary = {
+  id: string;
+  name: string;
+  componentFamily: ComponentFamily;
+  workspaceLabel: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ExportRecord = {
+  id: string;
+  generationId: string;
+  status: "queued" | "processing" | "ready" | "failed";
+  format: "stl" | "step" | "json" | "package";
+  filename: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 // ==============================
 // REQUIREMENTS-FIRST INPUT MODEL
 // ==============================
 
+export type LoadDirection = "vertical" | "lateral" | "multi-axis";
+export type ManufacturingProcess = "additive" | "machined";
+export type OptimizationPriority = "lightweight" | "stiffness" | "balanced";
+
 export type StructuralBracketRequirements = {
+  componentName: string;
+
   loadCase: {
     forceN: number;
-    direction: "vertical" | "lateral" | "multi-axis";
+    direction: LoadDirection;
     vibrationHz?: number;
   };
 
@@ -62,7 +91,7 @@ export type StructuralBracketRequirements = {
   };
 
   manufacturing: {
-    process: "additive" | "machined";
+    process: ManufacturingProcess;
     minWallThicknessMm: number;
     maxOverhangDeg: number;
     supportAllowed: boolean;
@@ -70,30 +99,124 @@ export type StructuralBracketRequirements = {
 
   objectives: {
     targetMassKg?: number;
-    priority: "lightweight" | "stiffness" | "balanced";
+    priority: OptimizationPriority;
   };
 };
 
-// ==============================
-// GENERATION INPUT
-// ==============================
+export type BellNozzleRequirements = {
+  componentName: string;
 
-export type GenerationInput = {
-  componentFamily: ComponentFamily;
-  requirements: StructuralBracketRequirements;
+  performance: {
+    targetThrustN: number;
+    burnDurationSec: number;
+    chamberPressureBar?: number;
+    ambientPressurePa: number;
+  };
+
+  propellant: {
+    oxidizer: "LOX" | "N2O" | "H2O2";
+    fuel: "RP1" | "CH4" | "H2" | "HTPB";
+    mixtureRatio?: number;
+  };
+
+  envelope: {
+    maxLengthMm: number;
+    maxExitDiameterMm: number;
+  };
+
+  thermal: {
+    coolingMode: "ablative" | "regenerative" | "radiative";
+    maxWallTemperatureC?: number;
+  };
+
+  manufacturing: {
+    process: ManufacturingProcess;
+    minWallThicknessMm: number;
+    supportAllowed: boolean;
+  };
+
+  objectives: {
+    priority: "efficiency" | "compactness" | "thermal-margin" | "balanced";
+    targetMassKg?: number;
+  };
+
+  safetyFactor: number;
 };
 
+export type GenerationInput =
+  | {
+      componentFamily: "structural-bracket";
+      requirements: StructuralBracketRequirements;
+    }
+  | {
+      componentFamily: "bell-nozzle";
+      requirements: BellNozzleRequirements;
+    }
+  | {
+      componentFamily: "pressure-vessel" | "rover-arm" | "grid-fin";
+      requirements: StructuralBracketRequirements;
+    };
+
 // ==============================
-// DERIVED OUTPUT
+// GENERATED CANDIDATE MODEL
 // ==============================
+
+export type CandidateGeometry = {
+  id: string;
+
+  family: ComponentFamily;
+  material: string;
+
+  widthMm: number;
+  heightMm: number;
+  depthMm: number;
+  lengthMm: number;
+  wallThicknessMm: number;
+
+  estimatedMassKg: number;
+  estimatedStressMpa: number;
+  estimatedDisplacementMm: number;
+  safetyFactorEstimate: number;
+
+  manufacturabilityScore: number;
+  supportBurdenScore: number;
+  performanceScore: number;
+  totalScore: number;
+
+  rejected: boolean;
+  rejectionReasons: string[];
+
+  derivedParameters: Record<string, number | string | boolean>;
+};
 
 export type DerivedGeometry = {
   widthMm: number;
   heightMm: number;
   depthMm: number;
+  lengthMm: number;
   wallThicknessMm: number;
   material: string;
   estimatedMassKg: number;
+  selectedCandidateId: string;
+  derivedParameters: Record<string, number | string | boolean>;
+};
+
+export type GeometryPreview = {
+  silhouette?: ComponentFamily;
+  material: string;
+  lengthMm: number;
+  widthMm?: number;
+  heightMm?: number;
+  depthMm?: number;
+  wallThicknessMm: number;
+  notes?: string[];
+  derived?: DerivedGeometry;
+  candidates?: {
+    evaluated: number;
+    accepted: number;
+    rejected: number;
+    bestCandidateId?: string;
+  };
 };
 
 // ==============================
@@ -101,26 +224,37 @@ export type DerivedGeometry = {
 // ==============================
 
 export type GenerationResult = {
-  geometryId: string;
+  revision: string;
+  exportState: "idle" | "queued" | "processing" | "ready" | "failed";
+  estimatedMassKg: number;
+  estimatedBurn: number;
+
+  geometry: GeometryPreview;
+  validations: ValidationMessage[];
+
   derived: DerivedGeometry;
   candidatesEvaluated: number;
-  rejected: number;
+  candidatesAccepted: number;
+  candidatesRejected: number;
+  selectedCandidate: CandidateGeometry;
+  rejectedCandidates: CandidateGeometry[];
+};
+
+export type GenerationSummary = {
+  id: string;
+  projectId: string;
+  parentGenerationId: string | null;
+  componentName: string;
+  status: "queued" | "running" | "completed" | "failed";
+  tokenCost: number;
+  createdAt: string;
+  updatedAt: string;
+  input: GenerationInput;
+  result?: GenerationResult;
 };
 
 // ==============================
-// VIEWER PREVIEW TYPE
-// ==============================
-
-export type GeometryPreview = {
-  silhouette?: ComponentFamily;
-  material: string;
-  lengthMm: number;
-  wallThicknessMm: number;
-  notes?: string[];
-};
-
-// ==============================
-// SHARED UI THEME (FIXES BUILD)
+// SHARED UI THEME
 // ==============================
 
 export const theme = {
