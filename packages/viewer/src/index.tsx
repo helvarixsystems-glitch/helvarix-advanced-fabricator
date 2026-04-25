@@ -124,16 +124,16 @@ function GeneratedMesh({
 }) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const [rotation, setRotation] = React.useState(() => ({
-    x: family === "bell-nozzle" ? -0.22 : -0.42,
-    y: family === "bell-nozzle" ? 0.48 : 0.7
+    x: family === "bell-nozzle" ? -0.22 : -0.28,
+    y: family === "bell-nozzle" ? 0.48 : 0.42
   }));
 
   const dragRef = React.useRef<{ x: number; y: number } | null>(null);
 
   React.useEffect(() => {
     setRotation({
-      x: family === "bell-nozzle" ? -0.22 : -0.42,
-      y: family === "bell-nozzle" ? 0.48 : 0.7
+      x: family === "bell-nozzle" ? -0.22 : -0.28,
+      y: family === "bell-nozzle" ? 0.48 : 0.42
     });
   }, [family]);
 
@@ -684,9 +684,10 @@ function rotateVertex(vertex: Vec3, rx: number, ry: number): Vec3 {
 function projectVertex(vertex: Vec3, width: number, height: number): [number, number] {
   const [x, y, z] = vertex;
   const sceneSize = Math.min(width, height);
-  const scale = sceneSize * 0.0043;
-  const distance = sceneSize * 0.9;
-  const perspective = distance / Math.max(distance + z * scale * 85, 1);
+
+  const scale = sceneSize * 0.00165;
+  const distance = sceneSize * 2.4;
+  const perspective = distance / Math.max(distance + z * scale * 28, 1);
 
   return [width / 2 + x * scale * perspective, height / 2 - y * scale * perspective];
 }
