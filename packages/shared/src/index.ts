@@ -189,6 +189,36 @@ export type CandidateGeometry = {
   derivedParameters: Record<string, number | string | boolean>;
 };
 
+export type BaselineComparison = {
+  baselineCandidatesGenerated: number;
+  baselineCandidatesSimulated: number;
+  baselineCandidatesRejectedAfterReview: number;
+
+  filteredCandidatesGenerated: number;
+  filteredCandidatesRejectedBeforeSimulation: number;
+  filteredCandidatesSimulated: number;
+
+  avoidedSimulationRuns: number;
+  reductionInSimulationLoadPercent: number;
+
+  selectedBaselineCandidateId?: string;
+  selectedFilteredCandidateId?: string;
+  selectedBaselineCandidateWasRejected?: boolean;
+};
+
+export type FabricationReview = {
+  vendor?: string;
+  process?: string;
+  material?: string;
+  printOrientation?: string;
+  supportsRequired?: boolean;
+  supportRemovalDifficulty?: "unknown" | "low" | "moderate" | "high";
+  dimensionalObservations?: string;
+  visibleDefects?: string;
+  predictedManufacturabilityMatchedObserved?: boolean;
+  notes?: string;
+};
+
 export type DerivedGeometry = {
   widthMm: number;
   heightMm: number;
@@ -233,11 +263,16 @@ export type GenerationResult = {
   validations: ValidationMessage[];
 
   derived: DerivedGeometry;
+
   candidatesEvaluated: number;
   candidatesAccepted: number;
   candidatesRejected: number;
+
   selectedCandidate: CandidateGeometry;
   rejectedCandidates: CandidateGeometry[];
+
+  baselineComparison?: BaselineComparison;
+  fabricationReview?: FabricationReview;
 };
 
 export type GenerationSummary = {
