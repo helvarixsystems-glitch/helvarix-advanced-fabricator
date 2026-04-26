@@ -19,9 +19,11 @@ import {
   appName,
   formatTimestamp,
   type BellNozzleRequirements,
+  type CandidateGeometry,
   type ComponentFamily,
   type CreditBalance,
   type GenerationInput,
+  type GenerationResult,
   type GenerationSummary,
   type ProjectSummary,
   type StructuralBracketRequirements
@@ -45,14 +47,14 @@ const VIEW_MODE_OPTIONS: Array<{ label: string; value: ViewerMode }> = [
 ];
 
 type ExportFormat = (typeof EXPORT_OPTIONS)[number]["value"];
-type RightPanelTab = "summary" | "simulation" | "validation" | "export" | "history";
+type RightPanelTab = "summary" | "simulation" | "validation" | "export" | "candidates";
 
 const RIGHT_PANEL_TABS: Array<{ label: string; value: RightPanelTab }> = [
   { label: "Summary", value: "summary" },
   { label: "Simulation", value: "simulation" },
   { label: "Validation", value: "validation" },
   { label: "Export", value: "export" },
-  { label: "History", value: "history" }
+  { label: "Candidates", value: "candidates" }
 ];
 
 const PRIMARY_BUTTON_STYLE: React.CSSProperties = {
@@ -106,6 +108,7 @@ function App() {
     componentRegistry.find((item) => item.key === selectedFamily) ?? componentRegistry[0];
 
   const validationMessages = displayGeneration?.result?.validations ?? [];
+  const result = displayGeneration?.result ?? null;
 
   React.useEffect(() => {
     void loadWorkspace();
@@ -139,6 +142,7 @@ function App() {
 
   async function loadWorkspace() {
     setLoadingWorkspace(true);
+
     try {
       await Promise.all([loadCredits(), loadProjects()]);
     } finally {
@@ -152,7 +156,7 @@ function App() {
       const data = await response.json();
       if (data.credits) setCredits(data.credits);
     } catch {
-      // keep starter values
+      // Keep starter values.
     }
   }
 
@@ -170,7 +174,7 @@ function App() {
         );
       }
     } catch {
-      // keep starter state
+      // Keep starter state.
     }
   }
 
@@ -196,7 +200,7 @@ function App() {
         });
       }
     } catch {
-      // keep current state
+      // Keep current state.
     }
   }
 
@@ -212,6 +216,8 @@ function App() {
     }
 
     setSubmittingGeneration(true);
+    setViewerMode("concept");
+    setRightPanelTab("candidates");
 
     try {
       const response = await fetch(`${API_BASE}/generations`, {
@@ -254,6 +260,8 @@ function App() {
     }
 
     setSubmittingIteration(true);
+    setViewerMode("concept");
+    setRightPanelTab("candidates");
 
     try {
       const response = await fetch(`${API_BASE}/iterations`, {
@@ -286,8 +294,17 @@ function App() {
   }
 
   async function handleRunSimulationFromFooter() {
+    setViewerMode("simulation");
     setRightPanelTab("simulation");
     await simulationPanelRef.current?.run();
+  }
+
+  function handleViewerModeClick(mode: ViewerMode) {
+    setViewerMode(mode);
+
+    if (mode === "simulation") {
+      setRightPanelTab("simulation");
+    }
   }
 
   async function handleExportPackage() {
@@ -305,7 +322,6 @@ function App() {
 
     try {
       let queuedExport: unknown = null;
-
       const serverFormat = exportFormat === "package" ? "stl" : exportFormat;
 
       try {
@@ -482,7 +498,7 @@ function App() {
                 label="Project Family"
                 value={activeProject?.componentFamily ?? form.componentFamily}
               />
-              <MetricRow label="Design Mode" value="Requirement-Derived Geometry" />
+              <MetricRow label="Design Mode" value="Requirements → Candidate Search" />
             </SidebarSection>
 
             <SidebarSection title="Component">
@@ -718,7 +734,8 @@ function App() {
                         ...requirements,
                         objectives: {
                           ...requirements.objectives,
-                          priority: value as BellNozzleRequirements["objectives"]["priority"]
+                          priority: value as BellNozzleRequirements["objectives"]["priority"],
+                          skeletonization: "sealed-required"
                         }
                       }))
                     }
@@ -732,7 +749,8 @@ function App() {
                         ...requirements,
                         objectives: {
                           ...requirements.objectives,
-                          targetMassKg: Number(value)
+                          targetMassKg: Number(value),
+                          skeletonization: "sealed-required"
                         }
                       }))
                     }
@@ -775,7 +793,7 @@ function App() {
                     }
                   />
                   <InputField
-                    label="Vibration Requirement (Hz)"
+                    label="Vibration (Hz)"
                     type="number"
                     value={form.requirements.loadCase.vibrationHz ?? 0}
                     onChange={(value) =>
@@ -848,7 +866,7 @@ function App() {
 
                 <SidebarSection title="Envelope">
                   <InputField
-                    label="Max Width (mm)"
+                    label="Max Width / X (mm)"
                     type="number"
                     value={form.requirements.envelope.maxWidthMm}
                     onChange={(value) =>
@@ -862,7 +880,7 @@ function App() {
                     }
                   />
                   <InputField
-                    label="Max Height (mm)"
+                    label="Max Height / Y (mm)"
                     type="number"
                     value={form.requirements.envelope.maxHeightMm}
                     onChange={(value) =>
@@ -876,7 +894,7 @@ function App() {
                     }
                   />
                   <InputField
-                    label="Max Depth (mm)"
+                    label="Max Depth / Z (mm)"
                     type="number"
                     value={form.requirements.envelope.maxDepthMm}
                     onChange={(value) =>
@@ -938,6 +956,40 @@ function App() {
                       }))
                     }
                   />
+                  <SelectField
+                    label="Skeletonization"
+                    defaultValue={form.requirements.objectives.skeletonization ?? "auto"}
+                    options={[
+                      { label: "Auto", value: "auto" },
+                      { label: "Aggressive", value: "aggressive" },
+                      { label: "None", value: "none" },
+                      { label: "Sealed Required", value: "sealed-required" }
+                    ]}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        objectives: {
+                          ...requirements.objectives,
+                          skeletonization:
+                            value as StructuralBracketRequirements["objectives"]["skeletonization"]
+                        }
+                      }))
+                    }
+                  />
+                  <InputField
+                    label="Target Open Area (%)"
+                    type="number"
+                    value={form.requirements.objectives.targetOpenAreaPercent ?? 32}
+                    onChange={(value) =>
+                      updateStructuralRequirements((requirements) => ({
+                        ...requirements,
+                        objectives: {
+                          ...requirements.objectives,
+                          targetOpenAreaPercent: Number(value)
+                        }
+                      }))
+                    }
+                  />
                   <InputField
                     label="Target Mass (kg)"
                     type="number"
@@ -958,12 +1010,12 @@ function App() {
 
             <SidebarSection title="Resolver Profile">
               <MetricRow label="Profile" value={selectedMeta.label} />
-              <MetricRow label="Mode" value="Requirements → Candidate Search" />
+              <MetricRow label="Mode" value="Generate → Test → Score → Select" />
               <MetricRow
                 label="Printable State"
                 value={
                   displayGeneration?.status === "completed"
-                    ? "Derived Candidate Ready"
+                    ? "Best Candidate Ready"
                     : "Awaiting Generation"
                 }
               />
@@ -984,31 +1036,23 @@ function App() {
                   className={`viewer-mode-button ${
                     viewerMode === option.value ? "viewer-mode-button-active" : ""
                   }`}
-                  onClick={() => setViewerMode(option.value)}
+                  onClick={() => handleViewerModeClick(option.value)}
                 >
                   {option.label}
                 </button>
               ))}
             </div>
 
-           <GraphPaperRoom
-  title={displayGeneration?.componentName ?? componentName}
-  geometry={
-    displayGeneration?.result
-      ? {
-          family: displayGeneration.result.geometry?.silhouette,
-          material: displayGeneration.result.derived?.material,
-          lengthMm: displayGeneration.result.derived?.lengthMm,
-          widthMm: displayGeneration.result.derived?.widthMm,
-          heightMm: displayGeneration.result.derived?.heightMm,
-          wallThicknessMm: displayGeneration.result.derived?.wallThicknessMm,
-          notes: displayGeneration.result.geometry?.notes
-        }
-      : undefined
-  }
-  mode={viewerMode}
-  status={displayGeneration?.status ?? "idle"}
-/>
+            <GraphPaperRoom
+              title={displayGeneration?.componentName ?? componentName}
+              geometry={buildViewerGeometry(displayGeneration)}
+              mode={viewerMode}
+              status={
+                viewerMode === "simulation"
+                  ? latestSimulation?.status ?? displayGeneration?.status ?? "idle"
+                  : displayGeneration?.status ?? "idle"
+              }
+            />
 
             <div className="statusbar">
               <span>Status: {(displayGeneration?.status ?? "idle").toUpperCase()}</span>
@@ -1032,7 +1076,12 @@ function App() {
                   className={`right-panel-tab ${
                     rightPanelTab === tab.value ? "right-panel-tab-active" : ""
                   }`}
-                  onClick={() => setRightPanelTab(tab.value)}
+                  onClick={() => {
+                    setRightPanelTab(tab.value);
+                    if (tab.value === "simulation") {
+                      setViewerMode("simulation");
+                    }
+                  }}
                 >
                   {tab.label}
                 </button>
@@ -1043,42 +1092,38 @@ function App() {
               {rightPanelTab === "summary" ? (
                 <>
                   <SidebarSection title="Selected Run">
-                    <MetricRow label="Revision" value={displayGeneration?.result?.revision ?? "—"} />
+                    <MetricRow label="Revision" value={result?.revision ?? "—"} />
                     <MetricRow label="Status" value={displayGeneration?.status ?? "—"} />
-                    <MetricRow
-                      label="Candidates"
-                      value={formatCandidateAcceptance(displayGeneration?.result)}
-                    />
-                    <MetricRow
-                      label="Material"
-                      value={getResultMaterial(displayGeneration?.result)}
-                    />
-                    <MetricRow
-                      label="Estimated Mass"
-                      value={formatEstimatedMass(displayGeneration?.result)}
-                    />
-                    <MetricRow
-                      label="Token Cost"
-                      value={displayGeneration ? String(displayGeneration.tokenCost) : "—"}
-                    />
+                    <MetricRow label="Candidates" value={formatCandidateAcceptance(result)} />
+                    <MetricRow label="Material" value={getResultMaterial(result)} />
+                    <MetricRow label="Estimated Mass" value={formatEstimatedMass(result)} />
+                    <MetricRow label="Token Cost" value={displayGeneration ? String(displayGeneration.tokenCost) : "—"} />
                   </SidebarSection>
 
                   <SidebarSection title="Derived Geometry">
+                    <MetricRow label="X Width" value={formatDerivedDimension(result, "widthMm")} />
+                    <MetricRow label="Y Height" value={formatDerivedDimension(result, "heightMm")} />
+                    <MetricRow label="Z Depth" value={formatDerivedDimension(result, "depthMm")} />
+                    <MetricRow label="Length" value={formatDerivedDimension(result, "lengthMm")} />
+                    <MetricRow label="Wall" value={formatDerivedDimension(result, "wallThicknessMm")} />
+                  </SidebarSection>
+
+                  <SidebarSection title="Skeletonization">
                     <MetricRow
-                      label="Length"
-                      value={formatDerivedDimension(displayGeneration?.result, "lengthMm")}
+                      label="Status"
+                      value={result?.selectedCandidate?.skeletonized ? "Active" : "Solid / Sealed"}
                     />
                     <MetricRow
-                      label="Width"
-                      value={formatDerivedDimension(displayGeneration?.result, "widthMm")}
+                      label="Open Area"
+                      value={formatPercent(result?.selectedCandidate?.openAreaPercent)}
                     />
                     <MetricRow
-                      label="Height"
-                      value={formatDerivedDimension(displayGeneration?.result, "heightMm")}
+                      label="Load Path"
+                      value={formatScore(result?.selectedCandidate?.loadPathContinuityScore)}
                     />
                     <MetricRow
-                      label="Wall"
-                      value={formatDerivedDimension(displayGeneration?.result, "wallThicknessMm")}
+                      label="Lattice Cells"
+                      value={formatNumber(result?.selectedCandidate?.latticeCellCount)}
                     />
                   </SidebarSection>
 
@@ -1090,8 +1135,9 @@ function App() {
                     <div className="message message-success">
                       <div className="message-title">Workflow Alignment</div>
                       <div className="message-body">
-                        Enter performance requirements, generate candidates, validate constraints,
-                        run simulation, then export the complete package.
+                        Requirements generate a design population. The engine filters invalid
+                        candidates, scores survivors, selects the best option, and prepares it for
+                        simulation/export.
                       </div>
                     </div>
                   </SidebarSection>
@@ -1099,12 +1145,32 @@ function App() {
               ) : null}
 
               {rightPanelTab === "simulation" ? (
-                <SimulationPanel
-                  ref={simulationPanelRef}
-                  apiBase={API_BASE}
-                  input={form}
-                  onSimulationChange={setLatestSimulation}
-                />
+                <>
+                  <SidebarSection title="Simulation View">
+                    <MetricRow label="Viewer Mode" value="Simulation" />
+                    <MetricRow label="Meshing Tool" value="Gmsh-ready workflow" />
+                    <MetricRow label="Structural Solver" value="CalculiX-ready workflow" />
+                    <MetricRow label="Latest Run" value={latestSimulation?.status ?? "Not Run"} />
+                    <div className="message">
+                      <div className="message-title">Simulation Display Behavior</div>
+                      <div className="message-body">
+                        Run Simulation switches the viewer into simulation mode and displays the
+                        backend simulation workflow state, including mesh preparation, structural
+                        solving, and result readiness.
+                      </div>
+                    </div>
+                  </SidebarSection>
+
+                  <SimulationPanel
+                    ref={simulationPanelRef}
+                    apiBase={API_BASE}
+                    input={form}
+                    onSimulationChange={(simulation) => {
+                      setLatestSimulation(simulation);
+                      setViewerMode("simulation");
+                    }}
+                  />
+                </>
               ) : null}
 
               {rightPanelTab === "validation" ? (
@@ -1171,56 +1237,60 @@ function App() {
                 </>
               ) : null}
 
-              {rightPanelTab === "history" ? (
-                <SidebarSection title="Generation History">
-                  {generations.length ? (
-                    <div className="history-list">
-                      {generations.map((generation) => {
-                        const isActive = generation.id === displayGeneration?.id;
+              {rightPanelTab === "candidates" ? (
+                <>
+                  <CandidateSearchPanel result={result} />
 
-                        return (
-                          <button
-                            key={generation.id}
-                            type="button"
-                            className={`history-item ${isActive ? "history-item-active" : ""}`}
-                            onClick={() => {
-                              setSelectedGenerationId(generation.id);
-                              syncFormFromGeneration(generation);
-                            }}
-                          >
-                            <div className="history-item-top">
-                              <span className="history-item-name">{generation.componentName}</span>
-                              <span
-                                className={`history-chip history-chip-${statusTone(
-                                  generation.status
-                                )}`}
-                              >
-                                {generation.status}
-                              </span>
-                            </div>
+                  <SidebarSection title="Generation History">
+                    {generations.length ? (
+                      <div className="history-list">
+                        {generations.map((generation) => {
+                          const isActive = generation.id === displayGeneration?.id;
 
-                            <div className="history-item-meta">
-                              <span>{generation.id}</span>
-                              <span>{formatTimestamp(generation.updatedAt)}</span>
-                            </div>
+                          return (
+                            <button
+                              key={generation.id}
+                              type="button"
+                              className={`history-item ${isActive ? "history-item-active" : ""}`}
+                              onClick={() => {
+                                setSelectedGenerationId(generation.id);
+                                syncFormFromGeneration(generation);
+                              }}
+                            >
+                              <div className="history-item-top">
+                                <span className="history-item-name">{generation.componentName}</span>
+                                <span
+                                  className={`history-chip history-chip-${statusTone(
+                                    generation.status
+                                  )}`}
+                                >
+                                  {generation.status}
+                                </span>
+                              </div>
 
-                            <div className="history-item-meta">
-                              <span>{generation.input.componentFamily}</span>
-                              <span>{generation.tokenCost} credits</span>
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="message">
-                      <div className="message-title">No Runs</div>
-                      <div className="message-body">
-                        This project does not have any generation history yet.
+                              <div className="history-item-meta">
+                                <span>{generation.id}</span>
+                                <span>{formatTimestamp(generation.updatedAt)}</span>
+                              </div>
+
+                              <div className="history-item-meta">
+                                <span>{generation.input.componentFamily}</span>
+                                <span>{generation.tokenCost} credits</span>
+                              </div>
+                            </button>
+                          );
+                        })}
                       </div>
-                    </div>
-                  )}
-                </SidebarSection>
+                    ) : (
+                      <div className="message">
+                        <div className="message-title">No Runs</div>
+                        <div className="message-body">
+                          This project does not have any generation history yet.
+                        </div>
+                      </div>
+                    )}
+                  </SidebarSection>
+                </>
               ) : null}
             </div>
           </WorkspacePanel>
@@ -1228,6 +1298,158 @@ function App() {
       </div>
     </AppShell>
   );
+}
+
+function CandidateSearchPanel({ result }: { result: GenerationResult | null }) {
+  const selected = result?.selectedCandidate;
+  const rejected = result?.rejectedCandidates ?? [];
+  const baseline = result?.baselineComparison;
+
+  const generated = result?.candidatesEvaluated ?? result?.geometry?.candidates?.evaluated ?? 0;
+  const rejectedCount = result?.candidatesRejected ?? result?.geometry?.candidates?.rejected ?? 0;
+  const simulated = result?.candidatesAccepted ?? result?.geometry?.candidates?.accepted ?? 0;
+
+  const candidates = [
+    ...(selected ? [{ ...selected, tableStatus: "selected" as const }] : []),
+    ...rejected.slice(0, 8).map((candidate) => ({
+      ...candidate,
+      tableStatus: "rejected" as const
+    }))
+  ];
+
+  return (
+    <>
+      <SidebarSection title="Candidate Search">
+        <MetricRow label="Generated" value={generated ? String(generated) : "—"} />
+        <MetricRow label="Rejected Before Simulation" value={rejectedCount ? String(rejectedCount) : "—"} />
+        <MetricRow label="Simulation-Ready" value={simulated ? String(simulated) : "—"} />
+        <MetricRow label="Selected" value={selected?.id ?? "—"} />
+
+        <div style={candidateBars}>
+          <CandidateBar label="Generated" value={generated} max={Math.max(generated, 1)} />
+          <CandidateBar label="Rejected" value={rejectedCount} max={Math.max(generated, 1)} />
+          <CandidateBar label="Simulated" value={simulated} max={Math.max(generated, 1)} />
+          <CandidateBar label="Selected" value={selected ? 1 : 0} max={Math.max(generated, 1)} />
+        </div>
+      </SidebarSection>
+
+      <SidebarSection title="Best Candidate">
+        <MetricRow label="Score" value={formatScore(selected?.totalScore)} />
+        <MetricRow label="Mass" value={formatKg(selected?.estimatedMassKg)} />
+        <MetricRow label="Stress" value={formatMpa(selected?.estimatedStressMpa)} />
+        <MetricRow label="Displacement" value={formatMm(selected?.estimatedDisplacementMm)} />
+        <MetricRow label="Safety Factor" value={formatNumber(selected?.safetyFactorEstimate)} />
+        <MetricRow label="Open Area" value={formatPercent(selected?.openAreaPercent)} />
+        <MetricRow label="Load Path" value={formatScore(selected?.loadPathContinuityScore)} />
+      </SidebarSection>
+
+      <SidebarSection title="Baseline Comparison">
+        <MetricRow
+          label="Baseline Simulations"
+          value={baseline ? String(baseline.baselineCandidatesSimulated) : "—"}
+        />
+        <MetricRow
+          label="Filtered Simulations"
+          value={baseline ? String(baseline.filteredCandidatesSimulated) : "—"}
+        />
+        <MetricRow
+          label="Avoided Runs"
+          value={baseline ? String(baseline.avoidedSimulationRuns) : "—"}
+        />
+        <MetricRow
+          label="Reduction"
+          value={
+            baseline
+              ? `${baseline.reductionInSimulationLoadPercent.toFixed(1)}%`
+              : "—"
+          }
+        />
+      </SidebarSection>
+
+      <SidebarSection title="Candidate Comparison">
+        {candidates.length ? (
+          <div style={candidateTableWrap}>
+            <div style={candidateTableHeader}>
+              <span>Candidate</span>
+              <span>Mass</span>
+              <span>SF</span>
+              <span>Score</span>
+              <span>Status</span>
+            </div>
+
+            {candidates.map((candidate) => (
+              <div key={candidate.id} style={candidateTableRow}>
+                <span title={candidate.id}>{shortCandidateId(candidate.id)}</span>
+                <span>{formatKg(candidate.estimatedMassKg)}</span>
+                <span>{formatNumber(candidate.safetyFactorEstimate)}</span>
+                <span>{formatNumber(candidate.totalScore)}</span>
+                <span>{candidate.tableStatus === "selected" ? "Selected" : "Rejected"}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="message">
+            <div className="message-title">Awaiting Candidate Search</div>
+            <div className="message-body">
+              Generate a design to see generated, rejected, simulated, and selected candidates.
+            </div>
+          </div>
+        )}
+      </SidebarSection>
+    </>
+  );
+}
+
+function CandidateBar({ label, value, max }: { label: string; value: number; max: number }) {
+  const width = Math.max(2, Math.min(100, (value / max) * 100));
+
+  return (
+    <div style={candidateBarRow}>
+      <div style={candidateBarMeta}>
+        <span>{label}</span>
+        <strong>{value}</strong>
+      </div>
+      <div style={candidateBarTrack}>
+        <div style={{ ...candidateBarFill, width: `${width}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function buildViewerGeometry(generation: GenerationSummary | null) {
+  if (!generation?.result) return undefined;
+
+  const result = generation.result;
+  const selected = result.selectedCandidate;
+
+  return {
+    family: result.geometry?.silhouette ?? generation.input.componentFamily,
+    silhouette: result.geometry?.silhouette ?? generation.input.componentFamily,
+    material: result.derived?.material ?? result.geometry?.material ?? selected?.material,
+    lengthMm: result.derived?.lengthMm ?? result.geometry?.lengthMm ?? selected?.lengthMm,
+    widthMm: result.derived?.widthMm ?? result.geometry?.widthMm ?? selected?.widthMm,
+    heightMm: result.derived?.heightMm ?? result.geometry?.heightMm ?? selected?.heightMm,
+    depthMm: result.derived?.depthMm ?? result.geometry?.depthMm ?? selected?.depthMm,
+    wallThicknessMm:
+      result.derived?.wallThicknessMm ?? result.geometry?.wallThicknessMm ?? selected?.wallThicknessMm,
+    skeletonized:
+      result.derived?.skeletonized ?? result.geometry?.skeletonized ?? selected?.skeletonized,
+    skeletonizationPolicy:
+      result.derived?.skeletonizationPolicy ??
+      result.geometry?.skeletonizationPolicy ??
+      selected?.skeletonizationPolicy,
+    openAreaPercent:
+      result.derived?.openAreaPercent ?? result.geometry?.openAreaPercent ?? selected?.openAreaPercent,
+    latticeCellCount:
+      result.derived?.latticeCellCount ?? result.geometry?.latticeCellCount ?? selected?.latticeCellCount,
+    loadPathContinuityScore:
+      result.derived?.loadPathContinuityScore ??
+      result.geometry?.loadPathContinuityScore ??
+      selected?.loadPathContinuityScore,
+    derived: result.derived,
+    derivedParameters: result.derived?.derivedParameters ?? selected?.derivedParameters,
+    notes: result.geometry?.notes
+  };
 }
 
 function getInputComponentName(input: GenerationInput) {
@@ -1265,12 +1487,10 @@ function formatEstimatedMass(result: GenerationSummary["result"]) {
     result?.derived?.estimatedMassKg ??
     result?.selectedCandidate?.estimatedMassKg;
 
-  if (typeof value !== "number" || Number.isNaN(value)) return "—";
-
-  return `${value.toFixed(2)} kg`;
+  return formatKg(value);
 }
 
-type DerivedDimensionKey = "lengthMm" | "widthMm" | "heightMm" | "wallThicknessMm";
+type DerivedDimensionKey = "lengthMm" | "widthMm" | "heightMm" | "depthMm" | "wallThicknessMm";
 
 function formatDerivedDimension(result: GenerationSummary["result"], key: DerivedDimensionKey) {
   const value =
@@ -1279,13 +1499,45 @@ function formatDerivedDimension(result: GenerationSummary["result"], key: Derive
     result?.geometry?.[key] ??
     result?.selectedCandidate?.[key];
 
-  if (typeof value !== "number" || Number.isNaN(value)) return "—";
-
-  return `${formatMetricNumber(value)} mm`;
+  return formatMm(value);
 }
 
 function formatMetricNumber(value: number) {
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function formatNumber(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return formatMetricNumber(value);
+}
+
+function formatMm(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return `${formatMetricNumber(value)} mm`;
+}
+
+function formatKg(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return `${value.toFixed(3)} kg`;
+}
+
+function formatMpa(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return `${value.toFixed(1)} MPa`;
+}
+
+function formatPercent(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return `${value.toFixed(1)}%`;
+}
+
+function formatScore(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return `${value.toFixed(1)}/100`;
+}
+
+function shortCandidateId(value: string) {
+  return value.replace("filtered_", "").replace("baseline_", "").replace("structural-bracket_", "");
 }
 
 function safeFileName(value: string) {
@@ -1376,6 +1628,19 @@ function buildReportText(
     `Revision: ${generation.result?.revision ?? "n/a"}`,
     `Estimated Mass: ${generation.result?.estimatedMassKg ?? "n/a"} kg`,
     "",
+    "CANDIDATE SEARCH",
+    JSON.stringify(
+      {
+        candidatesEvaluated: generation.result?.candidatesEvaluated,
+        candidatesAccepted: generation.result?.candidatesAccepted,
+        candidatesRejected: generation.result?.candidatesRejected,
+        selectedCandidate: generation.result?.selectedCandidate,
+        baselineComparison: generation.result?.baselineComparison
+      },
+      null,
+      2
+    ),
+    "",
     "DERIVED GEOMETRY",
     derived ? JSON.stringify(derived, null, 2) : "No derived geometry available.",
     "",
@@ -1400,26 +1665,26 @@ function buildPreviewStl(generation: GenerationSummary) {
 
   const width = Math.max(1, derived?.widthMm ?? 100);
   const height = Math.max(1, derived?.heightMm ?? 100);
-  const length = Math.max(1, derived?.lengthMm ?? 100);
+  const depth = Math.max(1, derived?.depthMm ?? derived?.lengthMm ?? 100);
 
   const x = width / 2;
   const y = height / 2;
-  const z = length;
+  const z = depth / 2;
 
   return [
     `solid ${name}`,
-    facet([[-x, -y, 0], [x, -y, 0], [x, y, 0]]),
-    facet([[-x, -y, 0], [x, y, 0], [-x, y, 0]]),
+    facet([[-x, -y, -z], [x, -y, -z], [x, y, -z]]),
+    facet([[-x, -y, -z], [x, y, -z], [-x, y, -z]]),
     facet([[-x, -y, z], [x, y, z], [x, -y, z]]),
     facet([[-x, -y, z], [-x, y, z], [x, y, z]]),
-    facet([[-x, -y, 0], [-x, -y, z], [x, -y, z]]),
-    facet([[-x, -y, 0], [x, -y, z], [x, -y, 0]]),
-    facet([[x, -y, 0], [x, -y, z], [x, y, z]]),
-    facet([[x, -y, 0], [x, y, z], [x, y, 0]]),
-    facet([[x, y, 0], [x, y, z], [-x, y, z]]),
-    facet([[x, y, 0], [-x, y, z], [-x, y, 0]]),
-    facet([[-x, y, 0], [-x, y, z], [-x, -y, z]]),
-    facet([[-x, y, 0], [-x, -y, z], [-x, -y, 0]]),
+    facet([[-x, -y, -z], [-x, -y, z], [x, -y, z]]),
+    facet([[-x, -y, -z], [x, -y, z], [x, -y, -z]]),
+    facet([[x, -y, -z], [x, -y, z], [x, y, z]]),
+    facet([[x, -y, -z], [x, y, z], [x, y, -z]]),
+    facet([[x, y, -z], [x, y, z], [-x, y, z]]),
+    facet([[x, y, -z], [-x, y, z], [-x, y, -z]]),
+    facet([[-x, y, -z], [-x, y, z], [-x, -y, z]]),
+    facet([[-x, y, -z], [-x, -y, z], [-x, -y, -z]]),
     `endsolid ${name}`
   ].join("\n");
 }
@@ -1536,6 +1801,66 @@ function crc32(data: Uint8Array) {
 
   return (crc ^ 0xffffffff) >>> 0;
 }
+
+const candidateBars: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+  marginTop: 12
+};
+
+const candidateBarRow: React.CSSProperties = {
+  display: "grid",
+  gap: 5
+};
+
+const candidateBarMeta: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  fontSize: 11,
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+  color: "#667085"
+};
+
+const candidateBarTrack: React.CSSProperties = {
+  height: 8,
+  border: "1px solid rgba(0,0,0,0.16)",
+  background: "rgba(0,0,0,0.04)",
+  overflow: "hidden"
+};
+
+const candidateBarFill: React.CSSProperties = {
+  height: "100%",
+  background: "#111111"
+};
+
+const candidateTableWrap: React.CSSProperties = {
+  display: "grid",
+  gap: 6,
+  overflowX: "auto"
+};
+
+const candidateTableHeader: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1.4fr 0.8fr 0.7fr 0.8fr 0.9fr",
+  gap: 8,
+  fontSize: 10,
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+  color: "#667085",
+  borderBottom: "1px solid rgba(0,0,0,0.14)",
+  paddingBottom: 6
+};
+
+const candidateTableRow: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1.4fr 0.8fr 0.7fr 0.8fr 0.9fr",
+  gap: 8,
+  fontSize: 11,
+  color: "#111111",
+  padding: "6px 0",
+  borderBottom: "1px solid rgba(0,0,0,0.08)"
+};
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
