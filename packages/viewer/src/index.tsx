@@ -1,5 +1,5 @@
 import React, { type CSSProperties } from "react";
-import { theme, type GeometryPreview } from "@haf/shared";
+import { theme, type GeometryPreview, type RenderableMesh } from "@haf/shared";
 
 export type ViewerMode = "concept" | "mesh" | "simulation";
 
@@ -258,17 +258,22 @@ function SimulationHud({
 }
 
 function MeshHud({ geometry }: { geometry?: SafeGeometry }) {
+  const renderMesh = getRenderableMesh(geometry);
+
+  const nodeCount = renderMesh?.vertices.length ?? 0;
+  const faceCount = renderMesh?.faces.length ?? 0;
+
   const width = getDimension(geometry, "widthMm", 120);
   const height = getDimension(geometry, "heightMm", 90);
   const depth = getDimension(geometry, "depthMm", 50);
-  const complexity = Math.max(48, Math.round((width + height + depth) * 0.9));
+  const fallbackComplexity = Math.max(48, Math.round((width + height + depth) * 0.9));
 
   return (
     <div style={styles.meshHud}>
-      <HudRow label="MESH TYPE" value="TRIANGULATED SURFACE" />
-      <HudRow label="DISPLAY" value="WIREFRAME + FACES" />
-      <HudRow label="EST. NODES" value={`${complexity}`} />
-      <HudRow label="EST. FACES" value={`${complexity * 2}`} />
+      <HudRow label="MESH TYPE" value={renderMesh ? "ENGINE MESH" : "FALLBACK MESH"} />
+      <HudRow label="DISPLAY" value="REAL TRIANGLE EDGES" />
+      <HudRow label="NODES" value={`${nodeCount || fallbackComplexity}`} />
+      <HudRow label="FACES" value={`${faceCount || fallbackComplexity * 2}`} />
     </div>
   );
 }
@@ -300,6 +305,61 @@ function drawGeneratedMesh(
   context.clearRect(0, 0, canvas.width, canvas.height);
 
   const mesh = buildMeshForFamily(geometry, family);
+  function getRenderableMesh(geometry?: SafeGeometry): MeshModel | undefined {
+  if (!geometry) return undefined;
+
+  const possibleMeshes = [
+    geometry.renderMesh,
+    geometry.derived?.renderMesh,
+    (geometry as Record<string, any>).geometry?.renderMesh,
+    (geometry as Record<string, any>).selectedCandidate?.renderMesh
+  ];
+
+  const renderMesh = possibleMeshes.find(isRenderableMesh);
+
+  if (!renderMesh) return undefined;
+
+  const vertices = renderMesh.vertices.map(normalizeRenderableVertex);
+
+  const faces = renderMesh.faces
+    .filter((face) => {
+      if (!Array.isArray(face.indices)) return false;
+      if (face.indices.length < 3) return false;
+
+      return face.indices.every(
+        (index) => Number.isInteger(index) && index >= 0 && index < vertices.length
+      );
+    })
+    .map((face) => ({
+      indices: face.indices,
+      shade: typeof face.shade === "number" ? face.shade : undefined
+    }));
+
+  if (!vertices.length || !faces.length) return undefined;
+
+  return centerAndScaleMesh({
+    vertices,
+    faces
+  });
+}
+
+function isRenderableMesh(value: unknown): value is RenderableMesh {
+  if (!value || typeof value !== "object") return false;
+
+  const mesh = value as Partial<RenderableMesh>;
+
+  return Array.isArray(mesh.vertices) && Array.isArray(mesh.faces);
+}
+
+function normalizeRenderableVertex(vertex: unknown): Vec3 {
+  if (!Array.isArray(vertex)) return [0, 0, 0];
+
+  const x = typeof vertex[0] === "number" && Number.isFinite(vertex[0]) ? vertex[0] : 0;
+  const y = typeof vertex[1] === "number" && Number.isFinite(vertex[1]) ? vertex[1] : 0;
+  const z = typeof vertex[2] === "number" && Number.isFinite(vertex[2]) ? vertex[2] : 0;
+
+  return [x, y, z];
+}
   const rotated = mesh.vertices.map((vertex) => rotateVertex(vertex, rotation.x, rotation.y));
   const projection = buildProjection(rotated, canvas.width, canvas.height, family);
   const projected = rotated.map((vertex) => projectVertex(vertex, projection));
@@ -498,6 +558,12 @@ function drawMeshStressOverlay(
 }
 
 function buildMeshForFamily(geometry: SafeGeometry, family: VisualFamily): MeshModel {
+  const renderMesh = getRenderableMesh(geometry);
+
+  if (renderMesh) {
+    return renderMesh;
+  }
+
   if (family === "bell-nozzle") return buildBellNozzleMesh(geometry);
   if (family === "pressure-vessel") return buildPressureVesselMesh(geometry);
   if (family === "rover-arm") return buildRoverArmMesh(geometry);
@@ -1273,17 +1339,18 @@ const styles: Record<string, CSSProperties | ((status?: string) => CSSProperties
     zIndex: 5
   },
   axisPanel: {
-    position: "absolute",
-    right: 12,
-    top: 62,
-    width: 210,
-    padding: 12,
-    background: "rgba(255,255,255,0.9)",
-    border: `1px solid ${theme.border}`,
-    display: "grid",
-    gap: 7,
-    zIndex: 5
-  },
+  position: "absolute",
+  right: 12,
+  top: 62,
+  width: 172,
+  padding: 9,
+  background: "rgba(255,255,255,0.78)",
+  border: `1px solid ${theme.border}`,
+  display: "grid",
+  gap: 5,
+  zIndex: 5,
+  pointerEvents: "none"
+},
   axisTitle: {
     fontSize: 10,
     letterSpacing: "0.16em",
@@ -1359,17 +1426,20 @@ const styles: Record<string, CSSProperties | ((status?: string) => CSSProperties
     textAlign: "right"
   },
   notesPanel: {
-    position: "absolute",
-    top: 62,
-    left: 12,
-    width: 260,
-    padding: 12,
-    background: "rgba(255,255,255,0.84)",
-    border: `1px solid ${theme.border}`,
-    display: "grid",
-    gap: 6,
-    zIndex: 4
-  },
+  position: "absolute",
+  top: 62,
+  left: 12,
+  width: 220,
+  maxHeight: 96,
+  overflow: "hidden",
+  padding: 10,
+  background: "rgba(255,255,255,0.72)",
+  border: `1px solid ${theme.border}`,
+  display: "grid",
+  gap: 5,
+  zIndex: 4,
+  pointerEvents: "none"
+},
   noteLine: {
     fontSize: 12,
     color: theme.muted,
