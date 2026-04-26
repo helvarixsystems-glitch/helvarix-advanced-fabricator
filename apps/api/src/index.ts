@@ -238,6 +238,46 @@ export default {
       });
     }
 
+    if (request.method === "POST" && url.pathname === "/phase-i/bracket-demo") {
+      const input = createPhaseIBracketDemoInput();
+      const tokenCost = estimateTokenCost(input);
+
+      if (credits.available < tokenCost) {
+        return json({ error: "Insufficient credits" }, 400);
+      }
+
+      credits.available -= tokenCost;
+      credits.reserved += tokenCost;
+
+      const project: ProjectSummary = {
+        id: `proj_phase_i_${Date.now()}`,
+        name: "Phase I Bracket Demo",
+        componentFamily: "structural-bracket",
+        workspaceLabel: "NASA SBIR Phase I Demo",
+        createdAt: now(),
+        updatedAt: now()
+      };
+
+      projects.set(project.id, project);
+
+      const generation: GenerationSummary = {
+        id: `gen_phase_i_${Date.now()}`,
+        projectId: project.id,
+        parentGenerationId: null,
+        componentName: getInputComponentName(input),
+        status: "queued",
+        tokenCost,
+        createdAt: now(),
+        updatedAt: now(),
+        input
+      };
+
+      generations.set(generation.id, generation);
+      ctx.waitUntil(runGenerationJob(generation.id, tokenCost));
+
+      return json({ project, generation }, 201);
+    }
+
     if (request.method === "POST" && url.pathname === "/generations") {
       const body = await readRequestJson(request);
       const parsed = parseCreateGenerationBody(body);
@@ -562,29 +602,85 @@ async function runSimulationJob(id: string, env: Env) {
 
   await runLocalSimulationFallback(id);
 }
+async function pollRemoteSimulation(id: string, remoteJobId: string, solverUrl: string) {
+  const baseUrl = solverUrl.replace(/\/$/, "");
+
+  for (let attempt = 0; attempt < 18; attempt += 1) {
+    await delay(1200);
+
+    const response = await fetch(`${baseUrl}/simulation/status/${encodeURIComponent(remoteJobId)}`);
+    const data = await readJson(response);
+
+    if (!response.ok) {
+      throw new Error(getRemoteError(data, "Failed to read remote solver status."));
+    }
+
+    if (!isRecord(data)) continue;
+
+    const status = typeof data.status === "string" ? data.status : "running";
+
+    if (status === "completed") {
+      const resultResponse = await fetch(
+        `${baseUrl}/simulation/result/${encodeURIComponent(remoteJobId)}`
+      );
+      const resultData = await readJson(resultResponse);
+
+      if (!resultResponse.ok) {
+        throw new Error(getRemoteError(resultData, "Failed to read remote solver result."));
+      }
+
+      const localFallback = await runSimulation(simulations.get(id)!.request);
+      const result = isSimulationResult(resultData) ? resultData : localFallback;
+      const reportMarkdown = buildSimulationReport(result);
+
+      const latest = simulations.get(id);
+      if (!latest) return;
+
+      simulations.set(id, {
+        ...latest,
+        status: "completed",
+        result,
+        reportMarkdown,
+        warnings: [
+          ...latest.warnings,
+          ...(isRecord(resultData) && Array.isArray(resultData.warnings)
+            ? resultData.warnings.map(String)
+            : [])
+        ],
+        errors: [],
+        updatedAt: now()
+      });
+
+      return;
+    }
+
+    if (status === "failed") {
+      throw new Error(getRemoteError(data, "Remote solver job failed."));
+    }
+  }
+
+  throw new Error("Remote solver timed out before completion.");
+}
 
 async function runLocalSimulationFallback(id: string) {
-  const latest = simulations.get(id);
-  if (!latest) return;
+  const record = simulations.get(id);
+  if (!record) return;
 
   try {
-    await delay(600);
-
-    const result = await runSimulation(latest.request);
-    const report = buildSimulationReport(latest.request, result);
+    const result = await runSimulation(record.request);
+    const reportMarkdown = buildSimulationReport(result);
 
     simulations.set(id, {
-      ...latest,
-      status: result.status === "failed" ? "failed" : "completed",
+      ...record,
+      status: "completed",
       result,
-      reportMarkdown: report.markdown,
-      warnings: [...latest.warnings, ...result.warnings],
-      errors: result.errors,
+      reportMarkdown,
+      errors: [],
       updatedAt: now()
     });
   } catch (err) {
     simulations.set(id, {
-      ...latest,
+      ...record,
       status: "failed",
       errors: [err instanceof Error ? err.message : String(err)],
       updatedAt: now()
@@ -592,201 +688,48 @@ async function runLocalSimulationFallback(id: string) {
   }
 }
 
-async function pollRemoteSimulation(id: string, remoteJobId: string, solverUrl: string) {
-  const base = solverUrl.replace(/\/$/, "");
-
-  for (let attempt = 0; attempt < 30; attempt++) {
-    await delay(2000);
-
-    const response = await fetch(`${base}/simulation/result/${encodeURIComponent(remoteJobId)}`);
-    const data = await readJson(response);
-
-    if (!response.ok) {
-      const latest = simulations.get(id);
-      if (!latest) return;
-
-      simulations.set(id, {
-        ...latest,
-        status: "running",
-        warnings: [
-          ...latest.warnings,
-          getRemoteError(data, `Remote solver result request failed: ${response.status}`),
-          "Falling back to internal fast estimate."
-        ],
-        updatedAt: now()
-      });
-
-      await runLocalSimulationFallback(id);
-      return;
-    }
-
-    const latest = simulations.get(id);
-    if (!latest) return;
-
-    const remoteStatus =
-      isRecord(data) &&
-      (data.status === "queued" ||
-        data.status === "running" ||
-        data.status === "completed" ||
-        data.status === "failed")
-        ? data.status
-        : latest.status;
-
-    const result =
-      isRecord(data) && isRecord(data.result)
-        ? (data.result as unknown as SimulationResult)
-        : latest.result;
-
-    const warnings =
-      isRecord(data) && Array.isArray(data.warnings)
-        ? data.warnings.map(String)
-        : latest.warnings;
-
-    const errors =
-      isRecord(data) && Array.isArray(data.errors)
-        ? data.errors.map(String)
-        : latest.errors;
-
-    const reportMarkdown = result
-      ? buildSimulationReport(latest.request, result).markdown
-      : latest.reportMarkdown;
-
-    simulations.set(id, {
-      ...latest,
-      status: remoteStatus,
-      result,
-      reportMarkdown,
-      warnings,
-      errors,
-      updatedAt: now()
-    });
-
-    if (remoteStatus === "completed") {
-      return;
-    }
-
-    if (remoteStatus === "failed") {
-      await runLocalSimulationFallback(id);
-      return;
-    }
-  }
-
-  const latest = simulations.get(id);
-  if (!latest) return;
-
-  simulations.set(id, {
-    ...latest,
-    status: "running",
-    warnings: [...latest.warnings, "Remote solver timed out; falling back to internal fast estimate."],
-    updatedAt: now()
-  });
-
-  await runLocalSimulationFallback(id);
-}
-
 function buildSimulationRequestFromInput(input: GenerationInput): SimulationRequest {
   const profile = buildSimulationProfile(input);
-  const material = mapMaterial(profile.materialName);
+  const material = getMaterial(profile.materialName) ?? createFallbackMaterial(profile.materialName);
 
   return {
-    id: `sim_request_${Date.now()}`,
-    createdAtIso: now(),
-    domain: "combined",
-
-    geometry: {
-      id: `geo_${Date.now()}`,
-      name: profile.componentName,
-      primitive: profile.componentFamily === "structural-bracket" ? "bracket" : "custom",
-      boundingBoxMm: {
-        x: profile.lengthMm,
-        y: profile.widthMm,
-        z: profile.depthMm
-      },
-      volumeMm3: profile.approximateVolumeMm3,
-      massKg: profile.estimatedMassKg,
-      metadata: {
-        componentFamily: profile.componentFamily,
-        wallThicknessMm: profile.wallThicknessMm,
-        heightMm: profile.heightMm,
-        ...profile.metadata
-      }
-    },
-
+    id: `simreq_${Date.now()}`,
+    name: `${profile.componentName} Simulation`,
+    componentFamily: profile.componentFamily,
     material,
-
+    geometry: {
+      lengthMm: profile.lengthMm,
+      widthMm: profile.widthMm,
+      heightMm: profile.heightMm,
+      depthMm: profile.depthMm,
+      wallThicknessMm: profile.wallThicknessMm,
+      approximateVolumeMm3: profile.approximateVolumeMm3,
+      estimatedMassKg: profile.estimatedMassKg
+    },
     structural: {
-      enabled: true,
-      solver: "internal-fast-estimate",
+      forceN: profile.structuralLoadN,
+      direction: profile.loadDirection,
       safetyFactorTarget: profile.safetyFactorTarget,
-      maxAllowableDisplacementMm: profile.maxAllowableDisplacementMm,
-      mesh: {
-        targetElementSizeMm: Math.max(2, profile.wallThicknessMm * 1.2),
-        refinementLevel: 2,
-        minElementSizeMm: Math.max(0.8, profile.wallThicknessMm * 0.35),
-        maxElementSizeMm: Math.max(6, profile.wallThicknessMm * 2.4),
-        boundaryLayer: false,
-        qualityTarget: 0.72
-      },
-      loads: [
-        {
-          id: "primary_load",
-          kind: "force",
-          label: "Primary requirements-derived design load",
-          magnitude: profile.structuralLoadN,
-          unit: "N",
-          direction: profile.loadDirection,
-          targetRegion: "outer-mounting-face"
-        }
-      ],
-      boundaryConditions: [
-        {
-          id: "fixed_base",
-          label: "Fixed mounting interface",
-          kind: "fixed",
-          targetRegion: "base-mounting-face",
-          lockedAxes: ["x", "y", "z"]
-        }
-      ]
+      maxAllowableDisplacementMm: profile.maxAllowableDisplacementMm
     },
-
-    thermal: {
-      enabled: profile.thermalEnabled,
-      solver: "internal-fast-estimate",
-      ambientTemperatureC: 22,
-      buildPlateTemperatureC: profile.manufacturingProcess === "fdm" ? 80 : 120,
-      peakProcessTemperatureC: profile.peakProcessTemperatureC,
-      coolingRateCPerSec: profile.manufacturingProcess === "fdm" ? 35 : 55,
-      distortionSensitivity: profile.distortionSensitivity
-    },
-
-    manufacturability: {
-      enabled: true,
+    manufacturing: {
       process: profile.manufacturingProcess,
       maxOverhangDeg: profile.maxOverhangDeg,
       minWallThicknessMm: profile.minWallThicknessMm,
-      minFeatureSizeMm: Math.max(0.8, profile.wallThicknessMm * 0.25),
-      preferredBuildAxis: profile.componentFamily === "bell-nozzle" ? "z" : "z",
-      allowSupports: profile.supportAllowed,
-      supportPenaltyWeight: profile.supportAllowed ? 0.18 : 0.34,
-      maxBuildVolumeMm: { x: 300, y: 300, z: 400 }
+      supportAllowed: profile.supportAllowed
     },
-
+    thermal: {
+      enabled: profile.thermalEnabled,
+      peakProcessTemperatureC: profile.peakProcessTemperatureC,
+      distortionSensitivity: profile.distortionSensitivity
+    },
     cfd: {
       enabled: profile.cfdEnabled,
-      solver: "internal-fast-estimate",
       fluid: profile.cfdFluid,
       velocityMS: profile.cfdVelocityMS,
       angleOfAttackDeg: profile.angleOfAttackDeg
     },
-
-    tags: ["frontend", "requirements-first", "simulation", profile.componentFamily],
-    metadata: {
-      source: "haf-api",
-      componentFamily: profile.componentFamily,
-      componentName: profile.componentName,
-      materialName: profile.materialName,
-      requirementsFirst: true
-    }
+    metadata: profile.metadata
   };
 }
 
@@ -799,320 +742,406 @@ function buildSimulationProfile(input: GenerationInput): SimulationProfile {
 }
 
 function buildStructuralSimulationProfile(
-  family: ComponentFamily,
+  componentFamily: ComponentFamily,
   requirements: StructuralBracketRequirements
 ): SimulationProfile {
-  const widthMm = positive(requirements.envelope.maxWidthMm, 140);
-  const heightMm = positive(requirements.envelope.maxHeightMm, 120);
-  const depthMm = positive(requirements.envelope.maxDepthMm, 60);
-  const wallThicknessMm = positive(requirements.manufacturing.minWallThicknessMm, 4);
-
-  const loadMultiplier =
-    requirements.loadCase.direction === "multi-axis"
-      ? 1.35
-      : requirements.loadCase.direction === "lateral"
-        ? 1.15
-        : 1;
-
-  const vibrationMultiplier = requirements.loadCase.vibrationHz
-    ? 1 + Math.min(requirements.loadCase.vibrationHz / 700, 0.35)
-    : 1;
-
-  const structuralLoadN =
-    positive(requirements.loadCase.forceN, 850) * loadMultiplier * vibrationMultiplier;
-
-  const materialName =
-    requirements.objectives.priority === "lightweight"
-      ? "AlSi10Mg"
-      : requirements.objectives.priority === "stiffness"
-        ? "Ti-6Al-4V"
-        : structuralLoadN > 3500
-          ? "Ti-6Al-4V"
-          : "AlSi10Mg";
+  const widthMm = requirements.envelope.maxWidthMm * 0.82;
+  const heightMm = requirements.envelope.maxHeightMm * 0.62;
+  const depthMm = requirements.envelope.maxDepthMm * 0.72;
+  const wallThicknessMm = requirements.manufacturing.minWallThicknessMm * 1.35;
 
   const approximateVolumeMm3 =
-    widthMm * depthMm * wallThicknessMm * 2.2 +
-    heightMm * depthMm * wallThicknessMm * 1.8 +
-    widthMm * heightMm * wallThicknessMm * 0.8;
+    widthMm * depthMm * wallThicknessMm * 2.1 +
+    heightMm * depthMm * wallThicknessMm * 1.45 +
+    4 * heightMm * wallThicknessMm * depthMm * 0.26;
 
   return {
-    componentFamily: family,
+    componentFamily,
     componentName: requirements.componentName,
-    materialName,
-
+    materialName: "Ti-6Al-4V",
     lengthMm: Math.max(widthMm, heightMm),
     widthMm,
     heightMm,
     depthMm,
     wallThicknessMm,
     approximateVolumeMm3,
-    estimatedMassKg: estimateMassKg(approximateVolumeMm3, materialName),
-
-    structuralLoadN,
-    loadDirection: loadDirectionToVector(requirements.loadCase.direction),
-    safetyFactorTarget: positive(requirements.safetyFactor, 2),
-    maxAllowableDisplacementMm: family === "rover-arm" ? 4 : 2.5,
-
-    manufacturingProcess: requirements.manufacturing.process === "additive" ? "slm" : "cnc",
-    maxOverhangDeg: positive(requirements.manufacturing.maxOverhangDeg, 45),
-    minWallThicknessMm: Math.max(0.8, wallThicknessMm * 0.9),
+    estimatedMassKg: (approximateVolumeMm3 / 1_000_000) * 4.43,
+    structuralLoadN: requirements.loadCase.forceN,
+    loadDirection: directionVector(requirements.loadCase.direction),
+    safetyFactorTarget: requirements.safetyFactor,
+    maxAllowableDisplacementMm: Math.max(0.25, heightMm * 0.01),
+    manufacturingProcess: mapManufacturingProcess(requirements.manufacturing.process),
+    maxOverhangDeg: requirements.manufacturing.maxOverhangDeg,
+    minWallThicknessMm: requirements.manufacturing.minWallThicknessMm,
     supportAllowed: requirements.manufacturing.supportAllowed,
-
-    thermalEnabled: true,
-    peakProcessTemperatureC: materialName === "AlSi10Mg" ? 580 : 900,
-    distortionSensitivity: materialName === "AlSi10Mg" ? 0.28 : 0.18,
-
-    cfdEnabled: family === "grid-fin",
+    thermalEnabled: requirements.manufacturing.process === "additive",
+    peakProcessTemperatureC: 720,
+    distortionSensitivity: 0.32,
+    cfdEnabled: false,
     cfdFluid: "air",
-    cfdVelocityMS: family === "grid-fin" ? 80 : 30,
-    angleOfAttackDeg: family === "grid-fin" ? 5 : 0,
-
+    cfdVelocityMS: 0,
+    angleOfAttackDeg: 0,
     metadata: {
-      loadDirection: requirements.loadCase.direction,
-      vibrationHz: requirements.loadCase.vibrationHz ?? 0,
+      source: "requirements",
       boltCount: requirements.mounting.boltCount,
       boltDiameterMm: requirements.mounting.boltDiameterMm,
       boltSpacingMm: requirements.mounting.spacingMm,
-      targetMassKg: requirements.objectives.targetMassKg,
-      optimizationPriority: requirements.objectives.priority
+      vibrationHz: requirements.loadCase.vibrationHz ?? null,
+      objectivePriority: requirements.objectives.priority
     }
   };
 }
 
 function buildBellNozzleSimulationProfile(requirements: BellNozzleRequirements): SimulationProfile {
-  const lengthMm = positive(requirements.envelope.maxLengthMm, 180);
-  const exitDiameterMm = positive(requirements.envelope.maxExitDiameterMm, 110);
-  const wallThicknessMm = positive(requirements.manufacturing.minWallThicknessMm, 3);
-
-  const chamberPressureBar = positive(requirements.performance.chamberPressureBar ?? 20, 20);
-  const chamberPressurePa = chamberPressureBar * 100_000;
-  const projectedAreaM2 = Math.PI * (exitDiameterMm / 2000) ** 2;
-  const pressureForceN = chamberPressurePa * projectedAreaM2 * 0.08;
-
-  const materialName =
-    requirements.thermal.coolingMode === "regenerative"
-      ? "GRCop-42"
-      : requirements.thermal.coolingMode === "radiative"
-        ? "C103 Niobium Alloy"
-        : "Inconel 718";
+  const lengthMm = requirements.envelope.maxLengthMm * 0.78;
+  const widthMm = requirements.envelope.maxExitDiameterMm * 0.86;
+  const wallThicknessMm = requirements.manufacturing.minWallThicknessMm * 1.7;
 
   const approximateVolumeMm3 =
     Math.PI *
-    ((exitDiameterMm / 2) ** 2 - Math.max(exitDiameterMm / 2 - wallThicknessMm, 1) ** 2) *
+    ((widthMm / 2) ** 2 - Math.max(widthMm / 2 - wallThicknessMm, 1) ** 2) *
     lengthMm *
-    0.48;
+    0.44;
 
   return {
     componentFamily: "bell-nozzle",
     componentName: requirements.componentName,
-    materialName,
-
+    materialName: requirements.thermal.coolingMode === "regenerative" ? "GRCop-42" : "Inconel 718",
     lengthMm,
-    widthMm: exitDiameterMm,
-    heightMm: exitDiameterMm,
-    depthMm: exitDiameterMm,
+    widthMm,
+    heightMm: widthMm,
+    depthMm: widthMm,
     wallThicknessMm,
     approximateVolumeMm3,
-    estimatedMassKg: estimateMassKg(approximateVolumeMm3, materialName),
-
-    structuralLoadN: Math.max(pressureForceN, requirements.performance.targetThrustN * 0.2),
+    estimatedMassKg: (approximateVolumeMm3 / 1_000_000) * 8.3,
+    structuralLoadN: Math.max(requirements.performance.targetThrustN, 1),
     loadDirection: { x: 0, y: 0, z: 1 },
-    safetyFactorTarget: positive(requirements.safetyFactor, 1.5),
-    maxAllowableDisplacementMm: 1.8,
-
-    manufacturingProcess: requirements.manufacturing.process === "additive" ? "slm" : "cnc",
+    safetyFactorTarget: requirements.safetyFactor,
+    maxAllowableDisplacementMm: Math.max(0.15, lengthMm * 0.006),
+    manufacturingProcess: mapManufacturingProcess(requirements.manufacturing.process),
     maxOverhangDeg: 45,
-    minWallThicknessMm: Math.max(0.8, wallThicknessMm * 0.9),
+    minWallThicknessMm: requirements.manufacturing.minWallThicknessMm,
     supportAllowed: requirements.manufacturing.supportAllowed,
-
     thermalEnabled: true,
     peakProcessTemperatureC:
-      requirements.thermal.coolingMode === "regenerative"
-        ? 820
-        : requirements.thermal.coolingMode === "radiative"
-          ? 1100
-          : 760,
+      requirements.thermal.maxWallTemperatureC ??
+      (requirements.thermal.coolingMode === "radiative" ? 1050 : 760),
     distortionSensitivity:
       requirements.thermal.coolingMode === "regenerative"
-        ? 0.22
-        : requirements.thermal.coolingMode === "radiative"
-          ? 0.16
-          : 0.3,
-
+        ? 0.24
+        : requirements.thermal.coolingMode === "ablative"
+          ? 0.36
+          : 0.48,
     cfdEnabled: true,
-    cfdFluid:
-      requirements.propellant.oxidizer === "LOX"
-        ? "oxygen"
-        : requirements.propellant.fuel === "CH4"
-          ? "methane"
-          : "air",
-    cfdVelocityMS: Math.max(80, Math.sqrt(requirements.performance.targetThrustN) * 8),
+    cfdFluid: requirements.propellant.oxidizer === "LOX" ? "oxygen" : "custom",
+    cfdVelocityMS: Math.sqrt(Math.max(requirements.performance.targetThrustN, 1)) * 8,
     angleOfAttackDeg: 0,
-
     metadata: {
+      source: "requirements",
       targetThrustN: requirements.performance.targetThrustN,
       burnDurationSec: requirements.performance.burnDurationSec,
-      chamberPressureBar,
+      chamberPressureBar: requirements.performance.chamberPressureBar ?? null,
       ambientPressurePa: requirements.performance.ambientPressurePa,
       oxidizer: requirements.propellant.oxidizer,
       fuel: requirements.propellant.fuel,
-      mixtureRatio: requirements.propellant.mixtureRatio,
+      mixtureRatio: requirements.propellant.mixtureRatio ?? null,
       coolingMode: requirements.thermal.coolingMode,
-      targetMassKg: requirements.objectives.targetMassKg,
-      optimizationPriority: requirements.objectives.priority
+      objectivePriority: requirements.objectives.priority
     }
   };
 }
 
-function mapMaterial(material: string): MaterialSpec {
-  if (material === "Ti-6Al-4V") return getMaterial("titanium_ti6al4v");
-  if (material === "Inconel 718") return getMaterial("inconel_718");
-  if (material === "AlSi10Mg") return getMaterial("aluminum_6061_t6");
-  if (material === "GRCop-42") return getMaterial("inconel_718");
-  if (material === "C103 Niobium Alloy") return getMaterial("inconel_718");
-  if (material === "PEEK-CF") return getMaterial("nylon");
-
-  return getMaterial("aluminum_6061_t6");
-}
-
-function estimateTokenCost(input: GenerationInput): number {
-  if (input.componentFamily === "bell-nozzle") {
-    const req = input.requirements;
-    const lengthCost = Math.floor(positive(req.envelope.maxLengthMm, 180) / 180);
-    const thrustCost = Math.floor(Math.sqrt(positive(req.performance.targetThrustN, 500)) / 16);
-    const materialCost = req.thermal.coolingMode === "regenerative" ? 4 : 3;
-
-    return clampInteger(10 + lengthCost + thrustCost + materialCost, 10, 32);
+function directionVector(direction: StructuralBracketRequirements["loadCase"]["direction"]) {
+  if (direction === "lateral") {
+    return { x: 1, y: 0, z: 0 };
   }
 
-  const req = input.requirements;
-  const envelopeCost = Math.floor(
-    (positive(req.envelope.maxWidthMm, 140) +
-      positive(req.envelope.maxHeightMm, 120) +
-      positive(req.envelope.maxDepthMm, 60)) /
-      220
-  );
-  const loadCost = Math.floor(Math.sqrt(positive(req.loadCase.forceN, 850)) / 18);
-  const materialCost = req.objectives.priority === "stiffness" ? 3 : 2;
+  if (direction === "multi-axis") {
+    return { x: 0.577, y: 0.577, z: 0.577 };
+  }
 
-  return clampInteger(10 + envelopeCost + loadCost + materialCost, 10, 28);
-}
-
-function estimateMassKg(volumeMm3: number, materialName: string) {
-  const densityGcc =
-    materialName === "AlSi10Mg"
-      ? 2.68
-      : materialName === "Ti-6Al-4V"
-        ? 4.43
-        : materialName === "Inconel 718"
-          ? 8.19
-          : materialName === "GRCop-42"
-            ? 8.85
-            : materialName === "C103 Niobium Alloy"
-              ? 8.89
-              : 2.2;
-
-  return (volumeMm3 / 1_000_000) * densityGcc;
-}
-
-function loadDirectionToVector(direction: StructuralBracketRequirements["loadCase"]["direction"]) {
-  if (direction === "lateral") return { x: 1, y: 0, z: 0 };
-  if (direction === "multi-axis") return { x: 0.58, y: -0.58, z: 0.58 };
   return { x: 0, y: -1, z: 0 };
+}
+
+function mapManufacturingProcess(process: "additive" | "machined") {
+  return process === "additive" ? "slm" : "cnc";
+}
+
+function createFallbackMaterial(name: string): MaterialSpec {
+  return {
+    name,
+    densityKgM3: 4430,
+    youngsModulusPa: 114_000_000_000,
+    poissonRatio: 0.34,
+    yieldStrengthPa: 880_000_000,
+    ultimateStrengthPa: 950_000_000,
+    thermalExpansion1K: 8.6e-6,
+    thermalConductivityWmK: 6.7
+  };
+}
+
+function createPhaseIBracketDemoInput(): GenerationInput {
+  return {
+    componentFamily: "structural-bracket",
+    requirements: {
+      componentName: "PHASE-I-AM-BRACKET-DEMO",
+      loadCase: {
+        forceN: 1250,
+        direction: "multi-axis",
+        vibrationHz: 65
+      },
+      safetyFactor: 2,
+      mounting: {
+        boltCount: 4,
+        boltDiameterMm: 6,
+        spacingMm: 42
+      },
+      envelope: {
+        maxWidthMm: 150,
+        maxHeightMm: 120,
+        maxDepthMm: 64
+      },
+      manufacturing: {
+        process: "additive",
+        minWallThicknessMm: 4,
+        maxOverhangDeg: 45,
+        supportAllowed: true
+      },
+      objectives: {
+        priority: "balanced",
+        targetMassKg: 1.15
+      }
+    }
+  };
+}
+
+function estimateTokenCost(input: GenerationInput) {
+  if (input.componentFamily === "bell-nozzle") {
+    const thrust = input.requirements.performance.targetThrustN;
+    const burn = input.requirements.performance.burnDurationSec;
+    return Math.max(18, Math.min(90, Math.ceil(thrust / 350 + burn / 4)));
+  }
+
+  const load = input.requirements.loadCase.forceN;
+  const vibration = input.requirements.loadCase.vibrationHz ?? 0;
+  return Math.max(10, Math.min(60, Math.ceil(load / 200 + vibration / 15 + 8)));
 }
 
 function getInputComponentName(input: GenerationInput) {
   return input.requirements.componentName;
 }
 
+async function readRequestJson(request: Request): Promise<unknown> {
+  try {
+    return await request.json();
+  } catch {
+    return null;
+  }
+}
+
+async function readJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function parseCreateProjectBody(body: unknown):
+  | { ok: true; value: CreateProjectBody }
+  | { ok: false; error: string } {
+  if (!isRecord(body)) {
+    return { ok: false, error: "Invalid JSON body" };
+  }
+
+  if (typeof body.name !== "string" || body.name.trim().length < 1) {
+    return { ok: false, error: "Project name is required" };
+  }
+
+  if (!isComponentFamily(body.componentFamily)) {
+    return { ok: false, error: "Valid componentFamily is required" };
+  }
+
+  if (typeof body.workspaceLabel !== "string" || body.workspaceLabel.trim().length < 1) {
+    return { ok: false, error: "workspaceLabel is required" };
+  }
+
+  return {
+    ok: true,
+    value: {
+      name: body.name.trim(),
+      componentFamily: body.componentFamily,
+      workspaceLabel: body.workspaceLabel.trim()
+    }
+  };
+}
+
+function parseCreateGenerationBody(body: unknown):
+  | { ok: true; value: CreateGenerationBody }
+  | { ok: false; error: string } {
+  if (!isRecord(body)) {
+    return { ok: false, error: "Invalid JSON body" };
+  }
+
+  if (typeof body.projectId !== "string" || body.projectId.trim().length < 1) {
+    return { ok: false, error: "projectId is required" };
+  }
+
+  if (!isRecord(body.input) || !isGenerationInput(body.input)) {
+    return { ok: false, error: "Valid generation input is required" };
+  }
+
+  return {
+    ok: true,
+    value: {
+      projectId: body.projectId,
+      input: body.input,
+      parentGenerationId:
+        typeof body.parentGenerationId === "string" ? body.parentGenerationId : null
+    }
+  };
+}
+
+function parseCreateIterationBody(body: unknown):
+  | { ok: true; value: CreateIterationBody }
+  | { ok: false; error: string } {
+  if (!isRecord(body)) {
+    return { ok: false, error: "Invalid JSON body" };
+  }
+
+  if (typeof body.projectId !== "string" || body.projectId.trim().length < 1) {
+    return { ok: false, error: "projectId is required" };
+  }
+
+  if (
+    typeof body.parentGenerationId !== "string" ||
+    body.parentGenerationId.trim().length < 1
+  ) {
+    return { ok: false, error: "parentGenerationId is required" };
+  }
+
+  if (!isRecord(body.input) || !isGenerationInput(body.input)) {
+    return { ok: false, error: "Valid generation input is required" };
+  }
+
+  return {
+    ok: true,
+    value: {
+      projectId: body.projectId,
+      parentGenerationId: body.parentGenerationId,
+      input: body.input
+    }
+  };
+}
+
+function parseQueueExportBody(body: unknown):
+  | { ok: true; value: QueueExportBody }
+  | { ok: false; error: string } {
+  if (!isRecord(body)) {
+    return { ok: false, error: "Invalid JSON body" };
+  }
+
+  if (typeof body.generationId !== "string" || body.generationId.trim().length < 1) {
+    return { ok: false, error: "generationId is required" };
+  }
+
+  if (
+    body.format !== "stl" &&
+    body.format !== "step" &&
+    body.format !== "json" &&
+    body.format !== "package"
+  ) {
+    return { ok: false, error: "format must be stl, step, json, or package" };
+  }
+
+  return {
+    ok: true,
+    value: {
+      generationId: body.generationId,
+      format: body.format
+    }
+  };
+}
+
 function isGenerationInput(value: unknown): value is GenerationInput {
   if (!isRecord(value)) return false;
 
-  const componentFamily = value.componentFamily;
-
-  if (
-    componentFamily !== "structural-bracket" &&
-    componentFamily !== "bell-nozzle" &&
-    componentFamily !== "pressure-vessel" &&
-    componentFamily !== "rover-arm" &&
-    componentFamily !== "grid-fin"
-  ) {
-    return false;
-  }
-
+  if (!isComponentFamily(value.componentFamily)) return false;
   if (!isRecord(value.requirements)) return false;
 
-  return typeof value.requirements.componentName === "string";
-}
-
-function parseCreateProjectBody(body: unknown): ParseResult<CreateProjectBody> {
-  if (!isRecord(body)) return parseError("Project body must be an object.");
-
-  const name = stringField(body, "name");
-  const workspaceLabel = stringField(body, "workspaceLabel");
-  const componentFamily = body.componentFamily;
-
-  if (!name) return parseError("Missing project name.");
-  if (!workspaceLabel) return parseError("Missing workspace label.");
-  if (!isComponentFamily(componentFamily)) return parseError("Invalid component family.");
-
-  return parseOk({
-    name,
-    workspaceLabel,
-    componentFamily
-  });
-}
-
-function parseCreateGenerationBody(body: unknown): ParseResult<CreateGenerationBody> {
-  if (!isRecord(body)) return parseError("Generation body must be an object.");
-
-  const projectId = stringField(body, "projectId");
-  const parentGenerationId =
-    typeof body.parentGenerationId === "string" ? body.parentGenerationId : null;
-
-  if (!projectId) return parseError("Missing projectId.");
-  if (!isGenerationInput(body.input)) return parseError("Invalid generation input.");
-
-  return parseOk({
-    projectId,
-    parentGenerationId,
-    input: body.input
-  });
-}
-
-function parseCreateIterationBody(body: unknown): ParseResult<CreateIterationBody> {
-  if (!isRecord(body)) return parseError("Iteration body must be an object.");
-
-  const projectId = stringField(body, "projectId");
-  const parentGenerationId = stringField(body, "parentGenerationId");
-
-  if (!projectId) return parseError("Missing projectId.");
-  if (!parentGenerationId) return parseError("Missing parentGenerationId.");
-  if (!isGenerationInput(body.input)) return parseError("Invalid generation input.");
-
-  return parseOk({
-    projectId,
-    parentGenerationId,
-    input: body.input
-  });
-}
-
-function parseQueueExportBody(body: unknown): ParseResult<QueueExportBody> {
-  if (!isRecord(body)) return parseError("Export body must be an object.");
-
-  const generationId = stringField(body, "generationId");
-  const format = body.format;
-
-  if (!generationId) return parseError("Missing generationId.");
-
-  if (format !== "stl" && format !== "step" && format !== "json" && format !== "package") {
-    return parseError("Invalid export format.");
+  if (value.componentFamily === "bell-nozzle") {
+    return isBellNozzleRequirements(value.requirements);
   }
 
-  return parseOk({
-    generationId,
-    format
-  });
+  return isStructuralBracketRequirements(value.requirements);
+}
+
+function isStructuralBracketRequirements(value: unknown): value is StructuralBracketRequirements {
+  if (!isRecord(value)) return false;
+  if (typeof value.componentName !== "string") return false;
+  if (!isRecord(value.loadCase)) return false;
+  if (!isRecord(value.mounting)) return false;
+  if (!isRecord(value.envelope)) return false;
+  if (!isRecord(value.manufacturing)) return false;
+  if (!isRecord(value.objectives)) return false;
+
+  return (
+    typeof value.loadCase.forceN === "number" &&
+    (value.loadCase.direction === "vertical" ||
+      value.loadCase.direction === "lateral" ||
+      value.loadCase.direction === "multi-axis") &&
+    typeof value.safetyFactor === "number" &&
+    typeof value.mounting.boltCount === "number" &&
+    typeof value.mounting.boltDiameterMm === "number" &&
+    typeof value.mounting.spacingMm === "number" &&
+    typeof value.envelope.maxWidthMm === "number" &&
+    typeof value.envelope.maxHeightMm === "number" &&
+    typeof value.envelope.maxDepthMm === "number" &&
+    (value.manufacturing.process === "additive" || value.manufacturing.process === "machined") &&
+    typeof value.manufacturing.minWallThicknessMm === "number" &&
+    typeof value.manufacturing.maxOverhangDeg === "number" &&
+    typeof value.manufacturing.supportAllowed === "boolean" &&
+    (value.objectives.priority === "lightweight" ||
+      value.objectives.priority === "stiffness" ||
+      value.objectives.priority === "balanced")
+  );
+}
+
+function isBellNozzleRequirements(value: unknown): value is BellNozzleRequirements {
+  if (!isRecord(value)) return false;
+  if (typeof value.componentName !== "string") return false;
+  if (!isRecord(value.performance)) return false;
+  if (!isRecord(value.propellant)) return false;
+  if (!isRecord(value.envelope)) return false;
+  if (!isRecord(value.thermal)) return false;
+  if (!isRecord(value.manufacturing)) return false;
+  if (!isRecord(value.objectives)) return false;
+
+  return (
+    typeof value.performance.targetThrustN === "number" &&
+    typeof value.performance.burnDurationSec === "number" &&
+    typeof value.performance.ambientPressurePa === "number" &&
+    (value.propellant.oxidizer === "LOX" ||
+      value.propellant.oxidizer === "N2O" ||
+      value.propellant.oxidizer === "H2O2") &&
+    (value.propellant.fuel === "RP1" ||
+      value.propellant.fuel === "CH4" ||
+      value.propellant.fuel === "H2" ||
+      value.propellant.fuel === "HTPB") &&
+    typeof value.envelope.maxLengthMm === "number" &&
+    typeof value.envelope.maxExitDiameterMm === "number" &&
+    (value.thermal.coolingMode === "ablative" ||
+      value.thermal.coolingMode === "regenerative" ||
+      value.thermal.coolingMode === "radiative") &&
+    (value.manufacturing.process === "additive" || value.manufacturing.process === "machined") &&
+    typeof value.manufacturing.minWallThicknessMm === "number" &&
+    typeof value.manufacturing.supportAllowed === "boolean" &&
+    (value.objectives.priority === "efficiency" ||
+      value.objectives.priority === "compactness" ||
+      value.objectives.priority === "thermal-margin" ||
+      value.objectives.priority === "balanced") &&
+    typeof value.safetyFactor === "number"
+  );
 }
 
 function isComponentFamily(value: unknown): value is ComponentFamily {
@@ -1125,93 +1154,50 @@ function isComponentFamily(value: unknown): value is ComponentFamily {
   );
 }
 
-type ParseResult<T> =
-  | {
-      ok: true;
-      value: T;
-    }
-  | {
-      ok: false;
-      error: string;
-    };
-
-function parseOk<T>(value: T): ParseResult<T> {
-  return { ok: true, value };
-}
-
-function parseError<T = never>(error: string): ParseResult<T> {
-  return { ok: false, error };
-}
-
-function stringField(record: Record<string, unknown>, key: string) {
-  const value = record[key];
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function positive(value: unknown, fallback: number) {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-function clampInteger(value: number, min: number, max: number) {
-  return Math.floor(Math.min(max, Math.max(min, value)));
-}
-
-async function readRequestJson(request: Request): Promise<unknown> {
-  try {
-    return await request.json();
-  } catch {
-    return {};
-  }
-}
-
-async function readJson(response: Response): Promise<unknown> {
-  const text = await response.text();
-
-  if (!text.trim()) {
-    return {};
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    return {
-      error: `Non-JSON response from remote service: ${text.slice(0, 240)}`
-    };
-  }
-}
-
-function getRemoteError(data: unknown, fallback: string): string {
-  if (isRecord(data)) {
-    if (typeof data.error === "string") return data.error;
-    if (typeof data.message === "string") return data.message;
-    if (Array.isArray(data.errors)) return data.errors.map(String).join(" ");
-  }
-
-  return fallback;
+function isSimulationResult(value: unknown): value is SimulationResult {
+  return (
+    isRecord(value) &&
+    isRecord(value.summary) &&
+    isRecord(value.structural) &&
+    Array.isArray(value.warnings) &&
+    Array.isArray(value.errors)
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+function getRemoteError(value: unknown, fallback: string) {
+  if (isRecord(value) && typeof value.error === "string") {
+    return value.error;
+  }
 
-function corsHeaders() {
-  return {
-    "access-control-allow-origin": "*",
-    "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "content-type,authorization"
-  };
+  if (isRecord(value) && typeof value.message === "string") {
+    return value.message;
+  }
+
+  return fallback;
 }
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
-      "content-type": "application/json; charset=utf-8",
-      ...corsHeaders()
+      ...corsHeaders(),
+      "content-type": "application/json; charset=utf-8"
     }
   });
+}
+
+function corsHeaders() {
+  return {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET,POST,OPTIONS",
+    "access-control-allow-headers": "content-type"
+  };
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
