@@ -1082,7 +1082,7 @@ function weightedAverage(items: Array<[number, number]>) {
   return items.reduce((sum, [value, weight]) => sum + value * weight, 0) / totalWeight;
 }
 
-function clamp(value: number, min: number, max) {
+function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
