@@ -123,18 +123,11 @@ function GeneratedMesh({
   status: string;
 }) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
-  const [rotation, setRotation] = React.useState(() => ({
-    x: family === "bell-nozzle" ? -0.22 : -0.28,
-    y: family === "bell-nozzle" ? 0.48 : 0.42
-  }));
-
+  const [rotation, setRotation] = React.useState(() => getDefaultRotation(family));
   const dragRef = React.useRef<{ x: number; y: number } | null>(null);
 
   React.useEffect(() => {
-    setRotation({
-      x: family === "bell-nozzle" ? -0.22 : -0.28,
-      y: family === "bell-nozzle" ? 0.48 : 0.42
-    });
+    setRotation(getDefaultRotation(family));
   }, [family]);
 
   React.useEffect(() => {
@@ -177,8 +170,8 @@ function GeneratedMesh({
           dragRef.current = { x: event.clientX, y: event.clientY };
 
           setRotation((current) => ({
-            x: clamp(current.x + dy * 0.008, -1.25, 1.25),
-            y: current.y + dx * 0.008
+            x: clamp(current.x + dy * 0.007, -1.15, 1.15),
+            y: current.y + dx * 0.007
           }));
         }}
         onPointerUp={() => {
@@ -192,6 +185,18 @@ function GeneratedMesh({
       <div style={styles.meshHint}>DRAG TO ROTATE</div>
     </div>
   );
+}
+
+function getDefaultRotation(family: VisualFamily) {
+  if (family === "bell-nozzle" || family === "nosecone" || family === "pressure-vessel") {
+    return { x: -0.18, y: 0.5 };
+  }
+
+  if (family === "structural-bracket") {
+    return { x: -0.12, y: 0.22 };
+  }
+
+  return { x: -0.22, y: 0.35 };
 }
 
 function drawGeneratedMesh(
@@ -209,18 +214,17 @@ function drawGeneratedMesh(
   context.clearRect(0, 0, canvas.width, canvas.height);
 
   const mesh = buildMeshForFamily(geometry, family);
-  const projected = mesh.vertices.map((vertex) =>
-    projectVertex(rotateVertex(vertex, rotation.x, rotation.y), canvas.width, canvas.height)
-  );
+  const rotated = mesh.vertices.map((vertex) => rotateVertex(vertex, rotation.x, rotation.y));
+  const projection = buildProjection(rotated, canvas.width, canvas.height, family);
+
+  const projected = rotated.map((vertex) => projectVertex(vertex, projection));
 
   const faces = mesh.faces
     .map((face) => {
       const points = face.indices.map((index) => projected[index]);
       const z =
-        face.indices.reduce((sum, index) => {
-          const rotated = rotateVertex(mesh.vertices[index], rotation.x, rotation.y);
-          return sum + rotated[2];
-        }, 0) / Math.max(face.indices.length, 1);
+        face.indices.reduce((sum, index) => sum + rotated[index][2], 0) /
+        Math.max(face.indices.length, 1);
 
       return { face, points, z };
     })
@@ -258,8 +262,8 @@ function drawGeneratedMesh(
       )}, ${Math.floor(materialTone[2] * shade)}, 0.97)`;
     }
 
-    context.strokeStyle = mode === "mesh" ? "rgba(0,0,0,0.44)" : "rgba(0,0,0,0.18)";
-    context.lineWidth = mode === "mesh" ? 1.2 * ratio : 0.8 * ratio;
+    context.strokeStyle = mode === "mesh" ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.2)";
+    context.lineWidth = mode === "mesh" ? 1.15 * ratio : 0.75 * ratio;
 
     context.fill();
     context.stroke();
@@ -276,6 +280,75 @@ function drawGeneratedMesh(
   context.restore();
 }
 
+function buildProjection(vertices: Vec3[], width: number, height: number, family: VisualFamily) {
+  if (!vertices.length) {
+    return {
+      centerX: width / 2,
+      centerY: height / 2,
+      scale: 1,
+      maxDepth: 1
+    };
+  }
+
+  const xs = vertices.map((vertex) => vertex[0]);
+  const ys = vertices.map((vertex) => vertex[1]);
+  const zs = vertices.map((vertex) => vertex[2]);
+
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const minZ = Math.min(...zs);
+  const maxZ = Math.max(...zs);
+
+  const modelWidth = Math.max(maxX - minX, 1);
+  const modelHeight = Math.max(maxY - minY, 1);
+  const maxDepth = Math.max(maxZ - minZ, 1);
+
+  const widthFit =
+    family === "structural-bracket"
+      ? width * 0.52
+      : family === "bell-nozzle"
+        ? width * 0.48
+        : width * 0.54;
+
+  const heightFit =
+    family === "structural-bracket"
+      ? height * 0.48
+      : family === "bell-nozzle"
+        ? height * 0.56
+        : height * 0.52;
+
+  const scale = Math.min(widthFit / modelWidth, heightFit / modelHeight);
+
+  return {
+    centerX: width / 2,
+    centerY: height * 0.48,
+    scale,
+    maxDepth
+  };
+}
+
+function projectVertex(
+  vertex: Vec3,
+  projection: {
+    centerX: number;
+    centerY: number;
+    scale: number;
+    maxDepth: number;
+  }
+): [number, number] {
+  const [x, y, z] = vertex;
+
+  const depthRatio = z / Math.max(projection.maxDepth, 1);
+  const perspective = 1 / Math.max(1 + depthRatio * 0.08, 0.82);
+
+  return [
+    projection.centerX + x * projection.scale * perspective,
+    projection.centerY - y * projection.scale * perspective
+  ];
+}
+
 function drawMeshWireframe(
   context: CanvasRenderingContext2D,
   mesh: MeshModel,
@@ -283,8 +356,8 @@ function drawMeshWireframe(
   ratio: number
 ) {
   context.save();
-  context.strokeStyle = "rgba(0,0,0,0.28)";
-  context.lineWidth = 0.8 * ratio;
+  context.strokeStyle = "rgba(0,0,0,0.3)";
+  context.lineWidth = 0.75 * ratio;
 
   for (const face of mesh.faces) {
     const points = face.indices.map((index) => projected[index]);
@@ -353,27 +426,82 @@ function buildMeshForFamily(geometry: SafeGeometry, family: VisualFamily): MeshM
 function buildStructuralBracketMesh(geometry: SafeGeometry): MeshModel {
   const width = getDimension(geometry, "widthMm", 140);
   const height = getDimension(geometry, "heightMm", 120);
-  const depth = getDimension(geometry, "depthMm", 52);
+  const depth = getDimension(geometry, "depthMm", 48);
   const wall = getDimension(geometry, "wallThicknessMm", 7);
 
   const mesh = createEmptyMesh();
 
-  addBox(mesh, [-width / 2, -height / 2, -depth / 2], [width / 2, -height / 2 + wall, depth / 2]);
-  addBox(mesh, [-width / 2, height / 2 - wall, -depth / 2], [width / 2, height / 2, depth / 2]);
-  addBox(mesh, [-width / 2, -height / 2, -depth / 2], [-width / 2 + wall, height / 2, depth / 2]);
-  addBox(mesh, [width / 2 - wall, -height / 2, -depth / 2], [width / 2, height / 2, depth / 2]);
+  const plateWidth = width * 0.74;
+  const plateHeight = height * 0.76;
+  const railHeight = Math.max(wall * 2.4, height * 0.14);
+  const sideRailWidth = Math.max(wall * 1.8, width * 0.08);
+  const ribWidth = Math.max(wall * 1.4, width * 0.055);
 
-  const ribWidth = Math.max(wall * 1.6, width * 0.08);
-  addBox(mesh, [-ribWidth / 2, -height / 2 + wall, -depth / 2], [ribWidth / 2, height / 2 - wall, depth / 2]);
+  addBox(
+    mesh,
+    [-plateWidth / 2, -plateHeight / 2, -depth * 0.46],
+    [plateWidth / 2, plateHeight / 2, -depth * 0.28],
+    0.68
+  );
 
-  addTriangularPrism(mesh, width, height, depth, wall, -1);
-  addTriangularPrism(mesh, width, height, depth, wall, 1);
+  addBox(
+    mesh,
+    [-width / 2, height / 2 - railHeight, -depth * 0.5],
+    [width / 2, height / 2, depth * 0.42],
+    0.82
+  );
 
-  const boltRadius = Math.max(wall * 0.8, width * 0.035);
-  addBoltBoss(mesh, -width * 0.31, -height * 0.36, depth, boltRadius);
-  addBoltBoss(mesh, width * 0.31, -height * 0.36, depth, boltRadius);
-  addBoltBoss(mesh, -width * 0.31, height * 0.36, depth, boltRadius);
-  addBoltBoss(mesh, width * 0.31, height * 0.36, depth, boltRadius);
+  addBox(
+    mesh,
+    [-width / 2, -height / 2, -depth * 0.5],
+    [width / 2, -height / 2 + railHeight, depth * 0.42],
+    0.78
+  );
+
+  addBox(
+    mesh,
+    [-width / 2, -height / 2, -depth * 0.5],
+    [-width / 2 + sideRailWidth, height / 2, depth * 0.18],
+    0.7
+  );
+
+  addBox(
+    mesh,
+    [width / 2 - sideRailWidth, -height / 2, -depth * 0.5],
+    [width / 2, height / 2, depth * 0.18],
+    0.72
+  );
+
+  addBox(
+    mesh,
+    [-ribWidth / 2, -height / 2 + railHeight, -depth * 0.34],
+    [ribWidth / 2, height / 2 - railHeight, depth * 0.34],
+    0.74
+  );
+
+  addBox(
+    mesh,
+    [-width * 0.31, -height / 2 + railHeight * 0.95, -depth * 0.24],
+    [-width * 0.31 + ribWidth, height / 2 - railHeight * 0.95, depth * 0.3],
+    0.62
+  );
+
+  addBox(
+    mesh,
+    [width * 0.31 - ribWidth, -height / 2 + railHeight * 0.95, -depth * 0.24],
+    [width * 0.31, height / 2 - railHeight * 0.95, depth * 0.3],
+    0.62
+  );
+
+  const boltRadius = Math.max(wall * 0.85, width * 0.034);
+  const topBoltY = height / 2 - railHeight * 0.52;
+  const bottomBoltY = -height / 2 + railHeight * 0.52;
+  const boltX = width * 0.32;
+
+  addBoltBoss(mesh, -boltX, topBoltY, depth, boltRadius);
+  addBoltBoss(mesh, boltX, topBoltY, depth, boltRadius);
+  addBoltBoss(mesh, -boltX, bottomBoltY, depth, boltRadius);
+  addBoltBoss(mesh, boltX, bottomBoltY, depth, boltRadius);
 
   return centerAndScaleMesh(mesh);
 }
@@ -553,7 +681,7 @@ function createLatheMesh(
   return mesh;
 }
 
-function addBox(mesh: MeshModel, min: Vec3, max: Vec3) {
+function addBox(mesh: MeshModel, min: Vec3, max: Vec3, shadeOffset = 0.7) {
   const start = mesh.vertices.length;
   const [x0, y0, z0] = min;
   const [x1, y1, z1] = max;
@@ -570,53 +698,19 @@ function addBox(mesh: MeshModel, min: Vec3, max: Vec3) {
   );
 
   mesh.faces.push(
-    { indices: [start + 0, start + 1, start + 2, start + 3], shade: 0.62 },
-    { indices: [start + 4, start + 7, start + 6, start + 5], shade: 0.86 },
-    { indices: [start + 0, start + 4, start + 5, start + 1], shade: 0.74 },
-    { indices: [start + 1, start + 5, start + 6, start + 2], shade: 0.78 },
-    { indices: [start + 2, start + 6, start + 7, start + 3], shade: 0.7 },
-    { indices: [start + 3, start + 7, start + 4, start + 0], shade: 0.58 }
-  );
-}
-
-function addTriangularPrism(
-  mesh: MeshModel,
-  width: number,
-  height: number,
-  depth: number,
-  wall: number,
-  side: -1 | 1
-) {
-  const start = mesh.vertices.length;
-  const x0 = side < 0 ? -width / 2 + wall : width / 2 - wall;
-  const x1 = side < 0 ? -width * 0.12 : width * 0.12;
-  const y0 = -height / 2 + wall;
-  const y1 = height / 2 - wall;
-  const z0 = -depth / 2;
-  const z1 = depth / 2;
-
-  mesh.vertices.push(
-    [x0, y0, z0],
-    [x1, y0, z0],
-    [x0, y1, z0],
-    [x0, y0, z1],
-    [x1, y0, z1],
-    [x0, y1, z1]
-  );
-
-  mesh.faces.push(
-    { indices: [start + 0, start + 1, start + 2], shade: 0.64 },
-    { indices: [start + 3, start + 5, start + 4], shade: 0.82 },
-    { indices: [start + 0, start + 3, start + 4, start + 1], shade: 0.76 },
-    { indices: [start + 1, start + 4, start + 5, start + 2], shade: 0.68 },
-    { indices: [start + 2, start + 5, start + 3, start + 0], shade: 0.58 }
+    { indices: [start + 0, start + 1, start + 2, start + 3], shade: shadeOffset * 0.9 },
+    { indices: [start + 4, start + 7, start + 6, start + 5], shade: shadeOffset * 1.12 },
+    { indices: [start + 0, start + 4, start + 5, start + 1], shade: shadeOffset * 1.02 },
+    { indices: [start + 1, start + 5, start + 6, start + 2], shade: shadeOffset * 1.06 },
+    { indices: [start + 2, start + 6, start + 7, start + 3], shade: shadeOffset * 0.96 },
+    { indices: [start + 3, start + 7, start + 4, start + 0], shade: shadeOffset * 0.86 }
   );
 }
 
 function addBoltBoss(mesh: MeshModel, x: number, y: number, depth: number, radius: number) {
-  const segments = 12;
-  const z0 = depth / 2;
-  const z1 = depth / 2 + radius * 0.55;
+  const segments = 18;
+  const z0 = depth * 0.42;
+  const z1 = depth * 0.56;
   const start = mesh.vertices.length;
 
   for (let layer = 0; layer < 2; layer += 1) {
@@ -630,11 +724,33 @@ function addBoltBoss(mesh: MeshModel, x: number, y: number, depth: number, radiu
     }
   }
 
+  const frontCenter = mesh.vertices.length;
+  mesh.vertices.push([x, y, z1]);
+
+  const holeRadius = radius * 0.38;
+  const holeStart = mesh.vertices.length;
+
+  for (let index = 0; index < segments; index += 1) {
+    const angle = (Math.PI * 2 * index) / segments;
+    mesh.vertices.push([x + Math.cos(angle) * holeRadius, y + Math.sin(angle) * holeRadius, z1 + 0.1]);
+  }
+
   for (let index = 0; index < segments; index += 1) {
     const next = (index + 1) % segments;
+
     mesh.faces.push({
       indices: [start + index, start + next, start + segments + next, start + segments + index],
-      shade: 0.82
+      shade: 0.88
+    });
+
+    mesh.faces.push({
+      indices: [frontCenter, start + segments + index, start + segments + next],
+      shade: 0.94
+    });
+
+    mesh.faces.push({
+      indices: [holeStart + index, holeStart + next, frontCenter],
+      shade: 0.34
     });
   }
 }
@@ -679,17 +795,6 @@ function rotateVertex(vertex: Vec3, rx: number, ry: number): Vec3 {
   const z2 = y * sinX + z1 * cosX;
 
   return [x1, y2, z2];
-}
-
-function projectVertex(vertex: Vec3, width: number, height: number): [number, number] {
-  const [x, y, z] = vertex;
-  const sceneSize = Math.min(width, height);
-
-  const scale = sceneSize * 0.00165;
-  const distance = sceneSize * 2.4;
-  const perspective = distance / Math.max(distance + z * scale * 28, 1);
-
-  return [width / 2 + x * scale * perspective, height / 2 - y * scale * perspective];
 }
 
 function normalizeFamily(geometry?: SafeGeometry): VisualFamily | undefined {
@@ -928,13 +1033,13 @@ const styles: Record<string, CSSProperties | ((status?: string) => CSSProperties
   shadow: {
     position: "absolute",
     left: "50%",
-    top: "68%",
-    width: 210,
-    height: 52,
+    top: "72%",
+    width: 230,
+    height: 54,
     transform: "translateX(-50%)",
     borderRadius: "50%",
     background:
-      "radial-gradient(ellipse at center, rgba(0,0,0,0.22) 0%, rgba(0,0,0,0.06) 54%, rgba(0,0,0,0) 78%)",
+      "radial-gradient(ellipse at center, rgba(0,0,0,0.18) 0%, rgba(0,0,0,0.05) 54%, rgba(0,0,0,0) 78%)",
     filter: "blur(2px)",
     zIndex: 1
   },
