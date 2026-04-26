@@ -33,7 +33,10 @@ type SafeGeometry = GeometryPreview & {
   depthMm?: number;
   lengthMm?: number;
   wallThicknessMm?: number;
-  notes?: string[];
+  skeletonized?: boolean;
+  openAreaPercent?: number;
+  latticeCellCount?: number;
+  loadPathContinuityScore?: number;
   dimensions?: Record<string, number>;
   derived?: Record<string, any>;
   derivedParameters?: Record<string, unknown>;
@@ -79,9 +82,9 @@ export function GraphPaperRoom({
 
         <div style={styles.modeBadge}>
           {mode === "concept"
-            ? "PART REVIEW"
+            ? "CONCEPT VIEW"
             : mode === "mesh"
-              ? "MESH VIEW"
+              ? "TRIANGULATED MESH"
               : simulationLabel}
         </div>
 
@@ -89,13 +92,13 @@ export function GraphPaperRoom({
           {safeGeometry ? formatGeometryLabel(safeGeometry) : "GENERATE CONCEPT · NO GEOMETRY LOADED"}
         </div>
 
+        {safeGeometry ? <AxisMeasurements geometry={safeGeometry} /> : null}
+
         {mode === "simulation" ? (
-          <div style={styles.simulationHud}>
-            <HudRow label="MODE" value={simulationLabel} />
-            <HudRow label="FLOW STATE" value={status === "running" ? "ACTIVE" : "PREVIEW"} />
-            <HudRow label="GEOMETRY" value={family ? family.toUpperCase() : "NONE"} />
-          </div>
+          <SimulationHud geometry={safeGeometry} family={family} status={status} />
         ) : null}
+
+        {mode === "mesh" ? <MeshHud geometry={safeGeometry} /> : null}
 
         {safeGeometry?.notes?.length ? (
           <div style={styles.notesPanel}>
@@ -187,6 +190,89 @@ function GeneratedMesh({
   );
 }
 
+function AxisMeasurements({ geometry }: { geometry: SafeGeometry }) {
+  const width = getDimensionOptional(geometry, "widthMm");
+  const height = getDimensionOptional(geometry, "heightMm");
+  const depth = getDimensionOptional(geometry, "depthMm");
+  const wall = getDimensionOptional(geometry, "wallThicknessMm");
+  const mass = geometry.derived?.estimatedMassKg ?? geometry.estimatedMassKg;
+  const openArea = geometry.openAreaPercent ?? geometry.derived?.openAreaPercent;
+
+  return (
+    <div style={styles.axisPanel}>
+      <div style={styles.axisTitle}>XYZ MEASUREMENTS</div>
+      <AxisRow axis="X" label="Width" value={formatMm(width)} />
+      <AxisRow axis="Y" label="Height" value={formatMm(height)} />
+      <AxisRow axis="Z" label="Depth" value={formatMm(depth)} />
+      <AxisRow axis="T" label="Wall" value={formatMm(wall)} />
+      <AxisRow axis="M" label="Mass" value={formatKg(numberFrom(mass))} />
+      <AxisRow axis="O" label="Open Area" value={formatPercent(numberFrom(openArea))} />
+    </div>
+  );
+}
+
+function AxisRow({ axis, label, value }: { axis: string; label: string; value: string }) {
+  return (
+    <div style={styles.axisRow}>
+      <span style={styles.axisLetter}>{axis}</span>
+      <span style={styles.axisLabel}>{label}</span>
+      <span style={styles.axisValue}>{value}</span>
+    </div>
+  );
+}
+
+function SimulationHud({
+  geometry,
+  family,
+  status
+}: {
+  geometry?: SafeGeometry;
+  family?: VisualFamily;
+  status: string;
+}) {
+  const derived = geometry ? getDerivedParameters(geometry) : {};
+  const isFlowFamily = family === "bell-nozzle" || family === "nosecone" || family === "grid-fin";
+
+  return (
+    <div style={styles.simulationHud}>
+      <HudRow label="MODE" value={family ? getSimulationLabel(family) : "SIMULATION"} />
+      <HudRow label="FLOW STATE" value={status === "running" ? "ACTIVE" : "PREVIEW"} />
+      <HudRow label="MESH TOOL" value="GMSH READY" />
+      <HudRow label="SOLVER" value={isFlowFamily ? "CFD / THERMAL" : "CALCULIX FEA"} />
+      <HudRow
+        label="LOAD"
+        value={
+          numberFrom(derived.requiredLoadN)
+            ? `${numberFrom(derived.requiredLoadN)?.toFixed(0)} N`
+            : family === "bell-nozzle"
+              ? "THRUST CASE"
+              : "STRUCTURAL CASE"
+        }
+      />
+      <HudRow
+        label="STATUS"
+        value={status === "completed" ? "RESULT READY" : status === "running" ? "SOLVING" : "IDLE"}
+      />
+    </div>
+  );
+}
+
+function MeshHud({ geometry }: { geometry?: SafeGeometry }) {
+  const width = getDimension(geometry, "widthMm", 120);
+  const height = getDimension(geometry, "heightMm", 90);
+  const depth = getDimension(geometry, "depthMm", 50);
+  const complexity = Math.max(48, Math.round((width + height + depth) * 0.9));
+
+  return (
+    <div style={styles.meshHud}>
+      <HudRow label="MESH TYPE" value="TRIANGULATED SURFACE" />
+      <HudRow label="DISPLAY" value="WIREFRAME + FACES" />
+      <HudRow label="EST. NODES" value={`${complexity}`} />
+      <HudRow label="EST. FACES" value={`${complexity * 2}`} />
+    </div>
+  );
+}
+
 function getDefaultRotation(family: VisualFamily) {
   if (family === "bell-nozzle" || family === "nosecone" || family === "pressure-vessel") {
     return { x: -0.18, y: 0.5 };
@@ -216,7 +302,6 @@ function drawGeneratedMesh(
   const mesh = buildMeshForFamily(geometry, family);
   const rotated = mesh.vertices.map((vertex) => rotateVertex(vertex, rotation.x, rotation.y));
   const projection = buildProjection(rotated, canvas.width, canvas.height, family);
-
   const projected = rotated.map((vertex) => projectVertex(vertex, projection));
 
   const faces = mesh.faces
@@ -253,8 +338,8 @@ function drawGeneratedMesh(
           ? `rgba(${Math.floor(125 * shade)}, ${Math.floor(145 * shade)}, ${Math.floor(
               170 * shade
             )}, 0.94)`
-          : `rgba(${Math.floor(160 * shade)}, ${Math.floor(128 * shade)}, ${Math.floor(
-              86 * shade
+          : `rgba(${Math.floor(180 * shade)}, ${Math.floor(120 * shade)}, ${Math.floor(
+              82 * shade
             )}, 0.94)`;
     } else {
       context.fillStyle = `rgba(${Math.floor(materialTone[0] * shade)}, ${Math.floor(
@@ -262,7 +347,7 @@ function drawGeneratedMesh(
       )}, ${Math.floor(materialTone[2] * shade)}, 0.97)`;
     }
 
-    context.strokeStyle = mode === "mesh" ? "rgba(0,0,0,0.45)" : "rgba(0,0,0,0.2)";
+    context.strokeStyle = mode === "mesh" ? "rgba(0,0,0,0.52)" : "rgba(0,0,0,0.2)";
     context.lineWidth = mode === "mesh" ? 1.15 * ratio : 0.75 * ratio;
 
     context.fill();
@@ -356,7 +441,7 @@ function drawMeshWireframe(
   ratio: number
 ) {
   context.save();
-  context.strokeStyle = "rgba(0,0,0,0.3)";
+  context.strokeStyle = "rgba(0,0,0,0.38)";
   context.lineWidth = 0.75 * ratio;
 
   for (const face of mesh.faces) {
@@ -389,8 +474,8 @@ function drawMeshStressOverlay(
 
   const isFlowFamily = family === "bell-nozzle" || family === "grid-fin" || family === "nosecone";
 
-  context.globalAlpha = status === "running" ? 0.92 : 0.58;
-  context.strokeStyle = isFlowFamily ? "rgba(60, 105, 150, 0.48)" : "rgba(150, 92, 35, 0.44)";
+  context.globalAlpha = status === "running" ? 0.92 : 0.64;
+  context.strokeStyle = isFlowFamily ? "rgba(60, 105, 150, 0.52)" : "rgba(160, 82, 35, 0.5)";
   context.lineWidth = 2 * ratio;
   context.setLineDash([10 * ratio, 8 * ratio]);
 
@@ -426,23 +511,21 @@ function buildMeshForFamily(geometry: SafeGeometry, family: VisualFamily): MeshM
 function buildStructuralBracketMesh(geometry: SafeGeometry): MeshModel {
   const width = getDimension(geometry, "widthMm", 140);
   const height = getDimension(geometry, "heightMm", 120);
-  const depth = getDimension(geometry, "depthMm", 48);
+  const depth = getDimension(geometry, "depthMm", 56);
   const wall = getDimension(geometry, "wallThicknessMm", 7);
+
+  const derived = getDerivedParameters(geometry);
+  const ribCount = numberFrom(derived.ribCount) ?? 4;
+  const gussetCount = numberFrom(derived.gussetCount) ?? 4;
+  const webCount = numberFrom(derived.diagonalWebCount) ?? 6;
+  const holeCount = numberFrom(derived.lighteningHoleCount) ?? 6;
+  const skeletonized = Boolean(geometry.skeletonized ?? geometry.derived?.skeletonized ?? holeCount > 0);
 
   const mesh = createEmptyMesh();
 
-  const plateWidth = width * 0.74;
-  const plateHeight = height * 0.76;
-  const railHeight = Math.max(wall * 2.4, height * 0.14);
-  const sideRailWidth = Math.max(wall * 1.8, width * 0.08);
-  const ribWidth = Math.max(wall * 1.4, width * 0.055);
-
-  addBox(
-    mesh,
-    [-plateWidth / 2, -plateHeight / 2, -depth * 0.46],
-    [plateWidth / 2, plateHeight / 2, -depth * 0.28],
-    0.68
-  );
+  const railHeight = Math.max(wall * 2.2, height * 0.13);
+  const sideRailWidth = Math.max(wall * 1.7, width * 0.075);
+  const ribWidth = Math.max(wall * 1.15, width * 0.042);
 
   addBox(
     mesh,
@@ -461,37 +544,61 @@ function buildStructuralBracketMesh(geometry: SafeGeometry): MeshModel {
   addBox(
     mesh,
     [-width / 2, -height / 2, -depth * 0.5],
-    [-width / 2 + sideRailWidth, height / 2, depth * 0.18],
+    [-width / 2 + sideRailWidth, height / 2, depth * 0.2],
     0.7
   );
 
   addBox(
     mesh,
     [width / 2 - sideRailWidth, -height / 2, -depth * 0.5],
-    [width / 2, height / 2, depth * 0.18],
+    [width / 2, height / 2, depth * 0.2],
     0.72
   );
 
-  addBox(
-    mesh,
-    [-ribWidth / 2, -height / 2 + railHeight, -depth * 0.34],
-    [ribWidth / 2, height / 2 - railHeight, depth * 0.34],
-    0.74
-  );
+  const usableHeight = height - railHeight * 2.35;
+  const ribSlots = Math.max(2, Math.min(7, ribCount));
 
-  addBox(
-    mesh,
-    [-width * 0.31, -height / 2 + railHeight * 0.95, -depth * 0.24],
-    [-width * 0.31 + ribWidth, height / 2 - railHeight * 0.95, depth * 0.3],
-    0.62
-  );
+  for (let index = 0; index < ribSlots; index += 1) {
+    const x = lerp(-width * 0.34, width * 0.34, ribSlots === 1 ? 0.5 : index / (ribSlots - 1));
+    addBox(
+      mesh,
+      [x - ribWidth / 2, -usableHeight / 2, -depth * 0.34],
+      [x + ribWidth / 2, usableHeight / 2, depth * 0.34],
+      0.64 + index * 0.02
+    );
+  }
 
-  addBox(
-    mesh,
-    [width * 0.31 - ribWidth, -height / 2 + railHeight * 0.95, -depth * 0.24],
-    [width * 0.31, height / 2 - railHeight * 0.95, depth * 0.3],
-    0.62
-  );
+  if (skeletonized) {
+    const webSlots = Math.max(2, Math.min(10, webCount));
+    for (let index = 0; index < webSlots; index += 1) {
+      const y = lerp(-height * 0.28, height * 0.28, webSlots === 1 ? 0.5 : index / (webSlots - 1));
+      const tilt = index % 2 === 0 ? 1 : -1;
+      addDiagonalBar(
+        mesh,
+        [-width * 0.34, y - wall * 0.4, -depth * 0.2],
+        [width * 0.34, y + tilt * height * 0.13, depth * 0.18],
+        Math.max(wall * 0.72, 3),
+        0.58
+      );
+    }
+
+    const holes = Math.max(2, Math.min(12, holeCount));
+    const holeRadius = Math.max(wall * 1.15, width * 0.028);
+    for (let index = 0; index < holes; index += 1) {
+      const column = index % 4;
+      const row = Math.floor(index / 4);
+      const x = lerp(-width * 0.27, width * 0.27, column / 3);
+      const y = lerp(height * 0.18, -height * 0.18, row / Math.max(Math.ceil(holes / 4) - 1, 1));
+      addHoleRim(mesh, x, y, depth, holeRadius, wall);
+    }
+  } else {
+    addBox(
+      mesh,
+      [-width * 0.31, -height * 0.24, -depth * 0.42],
+      [width * 0.31, height * 0.24, -depth * 0.26],
+      0.56
+    );
+  }
 
   const boltRadius = Math.max(wall * 0.85, width * 0.034);
   const topBoltY = height / 2 - railHeight * 0.52;
@@ -530,7 +637,10 @@ function buildBellNozzleMesh(geometry: SafeGeometry): MeshModel {
 
 function buildPressureVesselMesh(geometry: SafeGeometry): MeshModel {
   const length = getDimension(geometry, "lengthMm", 170);
-  const diameter = Math.max(getDimension(geometry, "widthMm", 96), getDimension(geometry, "heightMm", 96));
+  const diameter = Math.max(
+    getDimension(geometry, "widthMm", 96),
+    getDimension(geometry, "heightMm", 96)
+  );
   const wall = getDimension(geometry, "wallThicknessMm", 4);
 
   const stations = [
@@ -707,6 +817,68 @@ function addBox(mesh: MeshModel, min: Vec3, max: Vec3, shadeOffset = 0.7) {
   );
 }
 
+function addDiagonalBar(mesh: MeshModel, start: Vec3, end: Vec3, thickness: number, shade = 0.62) {
+  const [x0, y0, z0] = start;
+  const [x1, y1, z1] = end;
+
+  const minX = Math.min(x0, x1) - thickness / 2;
+  const maxX = Math.max(x0, x1) + thickness / 2;
+  const minY = Math.min(y0, y1) - thickness / 2;
+  const maxY = Math.max(y0, y1) + thickness / 2;
+  const minZ = Math.min(z0, z1) - thickness / 2;
+  const maxZ = Math.max(z0, z1) + thickness / 2;
+
+  addBox(mesh, [minX, minY, minZ], [maxX, maxY, maxZ], shade);
+}
+
+function addHoleRim(
+  mesh: MeshModel,
+  x: number,
+  y: number,
+  depth: number,
+  radius: number,
+  wall: number
+) {
+  const segments = 18;
+  const z0 = -depth * 0.22;
+  const z1 = depth * 0.23;
+  const outer = radius;
+  const inner = radius * 0.58;
+  const start = mesh.vertices.length;
+
+  for (let layer = 0; layer < 2; layer += 1) {
+    const z = layer === 0 ? z0 : z1;
+
+    for (const r of [outer, inner]) {
+      for (let index = 0; index < segments; index += 1) {
+        const angle = (Math.PI * 2 * index) / segments;
+        mesh.vertices.push([x + Math.cos(angle) * r, y + Math.sin(angle) * r, z]);
+      }
+    }
+  }
+
+  const frontOuter = start + segments * 2;
+  const frontInner = start + segments * 3;
+
+  for (let index = 0; index < segments; index += 1) {
+    const next = (index + 1) % segments;
+
+    mesh.faces.push({
+      indices: [frontOuter + index, frontOuter + next, frontInner + next, frontInner + index],
+      shade: 0.9
+    });
+
+    mesh.faces.push({
+      indices: [start + index, start + next, frontOuter + next, frontOuter + index],
+      shade: 0.64
+    });
+  }
+
+  if (wall > 0) {
+    // Keeps the rim present as a visible reinforced lightening feature.
+  }
+}
+
 function addBoltBoss(mesh: MeshModel, x: number, y: number, depth: number, radius: number) {
   const segments = 18;
   const z0 = depth * 0.42;
@@ -815,21 +987,20 @@ function normalizeFamily(geometry?: SafeGeometry): VisualFamily | undefined {
 
 function formatGeometryLabel(geometry: SafeGeometry) {
   const material = geometry.material ?? "MATERIAL TBD";
-  const primaryLength =
-    getDimensionOptional(geometry, "lengthMm") ??
-    getDimensionOptional(geometry, "heightMm") ??
-    getDimensionOptional(geometry, "widthMm");
+  const width = getDimensionOptional(geometry, "widthMm");
+  const height = getDimensionOptional(geometry, "heightMm");
+  const depth = getDimensionOptional(geometry, "depthMm");
 
-  const wallThickness = getDimensionOptional(geometry, "wallThicknessMm");
-
-  return `${material} · ${formatNumber(primaryLength)}MM · ${formatNumber(wallThickness)}MM WALL`;
+  return `${material} · X ${formatNumber(width)}MM · Y ${formatNumber(height)}MM · Z ${formatNumber(depth)}MM`;
 }
 
-function getDimension(geometry: SafeGeometry, key: string, fallback: number) {
+function getDimension(geometry: SafeGeometry | undefined, key: string, fallback: number) {
   return getDimensionOptional(geometry, key) ?? fallback;
 }
 
-function getDimensionOptional(geometry: SafeGeometry, key: string) {
+function getDimensionOptional(geometry: SafeGeometry | undefined, key: string) {
+  if (!geometry) return undefined;
+
   const direct = (geometry as Record<string, unknown>)[key];
   if (typeof direct === "number" && !Number.isNaN(direct)) return direct;
 
@@ -868,6 +1039,21 @@ function getMaterialTone(material?: string): [number, number, number] {
 function formatNumber(value?: number) {
   if (typeof value !== "number" || Number.isNaN(value)) return "—";
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function formatMm(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return `${value.toFixed(1)} mm`;
+}
+
+function formatKg(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return `${value.toFixed(3)} kg`;
+}
+
+function formatPercent(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "—";
+  return `${value.toFixed(1)}%`;
 }
 
 function numberFrom(value: unknown) {
@@ -940,14 +1126,18 @@ function SimulationBackdrop({
 
 function getSimulationLabel(family: VisualFamily) {
   if (family === "bell-nozzle" || family === "nosecone" || family === "grid-fin") {
-    return "FLOW REVIEW";
+    return "FLOW / THERMAL REVIEW";
   }
 
   if (family === "rover-arm" || family === "structural-bracket") {
-    return "LOAD TEST";
+    return "STRUCTURAL FEA REVIEW";
   }
 
-  return "PRINT STAND";
+  return "PRINT STAND REVIEW";
+}
+
+function lerp(a: number, b: number, t: number) {
+  return a + (b - a) * t;
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -1082,11 +1272,68 @@ const styles: Record<string, CSSProperties | ((status?: string) => CSSProperties
     color: theme.muted,
     zIndex: 5
   },
+  axisPanel: {
+    position: "absolute",
+    right: 12,
+    top: 62,
+    width: 210,
+    padding: 12,
+    background: "rgba(255,255,255,0.9)",
+    border: `1px solid ${theme.border}`,
+    display: "grid",
+    gap: 7,
+    zIndex: 5
+  },
+  axisTitle: {
+    fontSize: 10,
+    letterSpacing: "0.16em",
+    color: theme.muted,
+    textTransform: "uppercase",
+    marginBottom: 2
+  },
+  axisRow: {
+    display: "grid",
+    gridTemplateColumns: "22px 1fr auto",
+    gap: 8,
+    alignItems: "center",
+    fontSize: 11
+  },
+  axisLetter: {
+    display: "inline-flex",
+    width: 20,
+    height: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    border: `1px solid ${theme.borderStrong}`,
+    color: theme.text,
+    fontWeight: 700
+  },
+  axisLabel: {
+    color: theme.muted,
+    textTransform: "uppercase",
+    letterSpacing: "0.08em"
+  },
+  axisValue: {
+    color: theme.text,
+    fontVariantNumeric: "tabular-nums"
+  },
   simulationHud: {
     position: "absolute",
     left: 12,
     bottom: 12,
-    width: 210,
+    width: 230,
+    padding: 12,
+    background: "rgba(255,255,255,0.9)",
+    border: `1px solid ${theme.border}`,
+    display: "grid",
+    gap: 8,
+    zIndex: 5
+  },
+  meshHud: {
+    position: "absolute",
+    left: 12,
+    bottom: 12,
+    width: 230,
     padding: 12,
     background: "rgba(255,255,255,0.9)",
     border: `1px solid ${theme.border}`,
@@ -1108,7 +1355,8 @@ const styles: Record<string, CSSProperties | ((status?: string) => CSSProperties
   hudValue: {
     color: theme.text,
     letterSpacing: "0.08em",
-    textTransform: "uppercase"
+    textTransform: "uppercase",
+    textAlign: "right"
   },
   notesPanel: {
     position: "absolute",
