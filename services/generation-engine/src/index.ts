@@ -1,4 +1,5 @@
 import type {
+  BaselineComparison,
   BellNozzleRequirements,
   CandidateGeometry,
   ComponentFamily,
@@ -32,14 +33,62 @@ function generateStructuralPart(
   family: ComponentFamily,
   requirements: StructuralBracketRequirements
 ): GenerationResult {
-  const candidates = buildStructuralCandidates(family, requirements);
+  const filteredCandidates = buildStructuralCandidates(family, requirements, {
+    applyConstraintFiltering: true,
+    idPrefix: "filtered"
+  });
 
-  const accepted = candidates
+  const baselineCandidates = buildStructuralCandidates(family, requirements, {
+    applyConstraintFiltering: false,
+    idPrefix: "baseline"
+  });
+
+  const accepted = filteredCandidates
     .filter((candidate) => !candidate.rejected)
     .sort((a, b) => b.totalScore - a.totalScore);
 
-  const rejected = candidates.filter((candidate) => candidate.rejected);
-  const selected = accepted[0] ?? candidates.sort((a, b) => b.totalScore - a.totalScore)[0];
+  const rejected = filteredCandidates.filter((candidate) => candidate.rejected);
+
+  const selected =
+    accepted[0] ??
+    [...filteredCandidates].sort((a, b) => b.totalScore - a.totalScore)[0] ??
+    createEmergencyStructuralCandidate(family, requirements);
+
+  const baselineAcceptedAfterReview = baselineCandidates
+    .map((candidate) => ({
+      ...candidate,
+      rejected: evaluateStructuralCandidateForReview(candidate, requirements).length > 0,
+      rejectionReasons: evaluateStructuralCandidateForReview(candidate, requirements)
+    }))
+    .sort((a, b) => b.totalScore - a.totalScore);
+
+  const selectedBaseline = baselineAcceptedAfterReview[0];
+
+  const baselineRejectedAfterReview = baselineAcceptedAfterReview.filter(
+    (candidate) => candidate.rejected
+  );
+
+  const baselineComparison: BaselineComparison = {
+    baselineCandidatesGenerated: baselineCandidates.length,
+    baselineCandidatesSimulated: baselineCandidates.length,
+    baselineCandidatesRejectedAfterReview: baselineRejectedAfterReview.length,
+
+    filteredCandidatesGenerated: filteredCandidates.length,
+    filteredCandidatesRejectedBeforeSimulation: rejected.length,
+    filteredCandidatesSimulated: accepted.length,
+
+    avoidedSimulationRuns: Math.max(0, baselineCandidates.length - accepted.length),
+    reductionInSimulationLoadPercent: roundTo(
+      baselineCandidates.length > 0
+        ? ((baselineCandidates.length - accepted.length) / baselineCandidates.length) * 100
+        : 0,
+      0.1
+    ),
+
+    selectedBaselineCandidateId: selectedBaseline?.id,
+    selectedFilteredCandidateId: selected.id,
+    selectedBaselineCandidateWasRejected: selectedBaseline?.rejected ?? false
+  };
 
   const derived: DerivedGeometry = {
     widthMm: selected.widthMm,
@@ -53,13 +102,18 @@ function generateStructuralPart(
     derivedParameters: selected.derivedParameters
   };
 
-  const validations = buildStructuralValidations(requirements, selected, accepted.length);
+  const validations = buildStructuralValidations(
+    requirements,
+    selected,
+    accepted.length,
+    baselineComparison
+  );
 
   return {
-    revision: "REQ-GEN-001",
+    revision: "REQ-GEN-002-PHASE-I-BRACKET",
     exportState: "idle",
     estimatedMassKg: selected.estimatedMassKg,
-    estimatedBurn: estimateComputeBurn(candidates.length, accepted.length),
+    estimatedBurn: estimateComputeBurn(filteredCandidates.length, accepted.length),
     geometry: {
       silhouette: family,
       material: selected.material,
@@ -70,32 +124,46 @@ function generateStructuralPart(
       wallThicknessMm: selected.wallThicknessMm,
       derived,
       candidates: {
-        evaluated: candidates.length,
+        evaluated: filteredCandidates.length,
         accepted: accepted.length,
         rejected: rejected.length,
         bestCandidateId: selected.id
       },
       notes: [
-        `${candidates.length} requirement-derived candidates evaluated.`,
-        `${accepted.length} candidates satisfied first-pass constraints.`,
-        `Selected ${selected.material} with estimated safety factor ${selected.safetyFactorEstimate.toFixed(
+        `${filteredCandidates.length} requirement-derived structural candidates evaluated.`,
+        `${rejected.length} candidates rejected before simulation by design-time manufacturability and structural filters.`,
+        `${accepted.length} candidates advanced to simulation-ready review.`,
+        `Baseline comparison avoided ${baselineComparison.avoidedSimulationRuns} simulation runs, a ${baselineComparison.reductionInSimulationLoadPercent.toFixed(
+          1
+        )}% estimated reduction.`,
+        `Selected ${selected.material} candidate ${selected.id} with estimated safety factor ${selected.safetyFactorEstimate.toFixed(
           2
         )}.`
       ]
     },
     validations,
     derived,
-    candidatesEvaluated: candidates.length,
+    candidatesEvaluated: filteredCandidates.length,
     candidatesAccepted: accepted.length,
     candidatesRejected: rejected.length,
     selectedCandidate: selected,
-    rejectedCandidates: rejected.slice(0, 12)
+    rejectedCandidates: rejected.slice(0, 20),
+    baselineComparison,
+    fabricationReview: {
+      supportRemovalDifficulty: "unknown",
+      notes:
+        "Fabrication review placeholder. Populate after external AM print with vendor, material, orientation, support outcome, dimensional observations, defects, and predicted-vs-observed comparison."
+    }
   };
 }
 
 function buildStructuralCandidates(
   family: ComponentFamily,
-  requirements: StructuralBracketRequirements
+  requirements: StructuralBracketRequirements,
+  options: {
+    applyConstraintFiltering: boolean;
+    idPrefix: string;
+  }
 ): CandidateGeometry[] {
   const candidates: CandidateGeometry[] = [];
   const materialOptions = selectStructuralMaterialOptions(requirements);
@@ -118,6 +186,7 @@ function buildStructuralCandidates(
     vibrationMultiplier;
 
   const minThickness = requirements.manufacturing.minWallThicknessMm;
+
   const basePadRequirement =
     requirements.mounting.spacingMm +
     requirements.mounting.boltDiameterMm * 3.2;
@@ -125,43 +194,53 @@ function buildStructuralCandidates(
   let index = 0;
 
   for (const material of materialOptions) {
-    for (const thicknessFactor of [1, 1.25, 1.5, 1.8, 2.15]) {
-      for (const ribCount of [2, 3, 4, 5, 6]) {
-        for (const gussetCount of [2, 4, 6]) {
+    for (const thicknessFactor of [0.8, 1, 1.15, 1.25, 1.5, 1.8, 2.15]) {
+      for (const ribCount of [1, 2, 3, 4, 5, 6]) {
+        for (const gussetCount of [0, 2, 4, 6]) {
           index += 1;
 
           const wallThicknessMm = roundTo(minThickness * thicknessFactor, 0.1);
 
           const widthMm = clamp(
-            Math.max(basePadRequirement, requirements.envelope.maxWidthMm * (0.58 + ribCount * 0.035)),
-            basePadRequirement,
-            requirements.envelope.maxWidthMm
+            Math.max(
+              basePadRequirement * (ribCount <= 1 ? 0.9 : 1),
+              requirements.envelope.maxWidthMm * (0.5 + ribCount * 0.04)
+            ),
+            requirements.mounting.boltDiameterMm * 4,
+            requirements.envelope.maxWidthMm * 1.08
           );
 
           const heightMm = clamp(
-            requirements.envelope.maxHeightMm * (0.42 + gussetCount * 0.045),
-            requirements.mounting.boltDiameterMm * 5,
-            requirements.envelope.maxHeightMm
+            requirements.envelope.maxHeightMm * (0.36 + gussetCount * 0.05),
+            requirements.mounting.boltDiameterMm * 4,
+            requirements.envelope.maxHeightMm * 1.08
           );
 
           const depthMm = clamp(
-            requirements.envelope.maxDepthMm * (0.46 + thicknessFactor * 0.08),
-            requirements.mounting.boltDiameterMm * 4,
-            requirements.envelope.maxDepthMm
+            requirements.envelope.maxDepthMm * (0.42 + thicknessFactor * 0.08),
+            requirements.mounting.boltDiameterMm * 3.5,
+            requirements.envelope.maxDepthMm * 1.08
           );
 
           const ribEfficiency = 1 + ribCount * 0.11;
           const gussetEfficiency = 1 + gussetCount * 0.07;
+          const boltInterfacePenalty = widthMm < basePadRequirement ? 0.72 : 1;
+
           const sectionAreaMm2 = wallThicknessMm * (widthMm + heightMm * 0.7);
+
           const loadCapacityN =
             sectionAreaMm2 *
             material.allowableStressMpa *
             ribEfficiency *
             gussetEfficiency *
+            boltInterfacePenalty *
             0.82;
 
           const safetyFactorEstimate = loadCapacityN / Math.max(requirements.loadCase.forceN, 1);
-          const estimatedStressMpa = requiredLoadN / Math.max(sectionAreaMm2 * ribEfficiency, 1);
+
+          const estimatedStressMpa =
+            requiredLoadN / Math.max(sectionAreaMm2 * ribEfficiency * boltInterfacePenalty, 1);
+
           const estimatedDisplacementMm =
             (requirements.loadCase.forceN * Math.pow(heightMm, 2)) /
             Math.max(material.elasticModulusMpa * sectionAreaMm2 * ribEfficiency * 175, 1);
@@ -188,11 +267,16 @@ function buildStructuralCandidates(
               ? 18
               : 0;
 
+          const supportAccessPenalty =
+            requirements.manufacturing.process === "additive" && gussetCount === 0 ? 16 : 0;
+
           const manufacturabilityScore = clamp(
             100 -
               overhangPenalty -
               unsupportedPenalty -
-              Math.max(0, wallThicknessMm - minThickness * 2.4) * 4,
+              supportAccessPenalty -
+              Math.max(0, wallThicknessMm - minThickness * 2.4) * 4 -
+              (widthMm < basePadRequirement ? 18 : 0),
             0,
             100
           );
@@ -207,12 +291,18 @@ function buildStructuralCandidates(
           );
 
           const targetMass = requirements.objectives.targetMassKg;
+
           const massScore = targetMass
             ? clamp(100 - Math.abs(estimatedMassKg - targetMass) * 55, 0, 100)
             : clamp(100 - estimatedMassKg * 18, 0, 100);
 
           const stiffnessScore = clamp(100 - estimatedDisplacementMm * 28, 0, 100);
-          const strengthScore = clamp((safetyFactorEstimate / requirements.safetyFactor) * 100, 0, 125);
+
+          const strengthScore = clamp(
+            (safetyFactorEstimate / Math.max(requirements.safetyFactor, 0.1)) * 100,
+            0,
+            125
+          );
 
           const performanceScore =
             requirements.objectives.priority === "lightweight"
@@ -237,42 +327,10 @@ function buildStructuralCandidates(
                     [massScore, 0.1]
                   ]);
 
-          const rejectionReasons: string[] = [];
-
-          if (widthMm > requirements.envelope.maxWidthMm) {
-            rejectionReasons.push("Exceeds maximum width envelope.");
-          }
-
-          if (heightMm > requirements.envelope.maxHeightMm) {
-            rejectionReasons.push("Exceeds maximum height envelope.");
-          }
-
-          if (depthMm > requirements.envelope.maxDepthMm) {
-            rejectionReasons.push("Exceeds maximum depth envelope.");
-          }
-
-          if (widthMm < basePadRequirement) {
-            rejectionReasons.push("Bolt pattern cannot fit within generated base width.");
-          }
-
-          if (wallThicknessMm < minThickness) {
-            rejectionReasons.push("Wall thickness below manufacturing minimum.");
-          }
-
-          if (safetyFactorEstimate < requirements.safetyFactor) {
-            rejectionReasons.push("Estimated safety factor below requirement.");
-          }
-
-          if (manufacturabilityScore < 55) {
-            rejectionReasons.push("Manufacturability score below threshold.");
-          }
-
-          if (targetMass && estimatedMassKg > targetMass * 1.75) {
-            rejectionReasons.push("Mass exceeds target mass tolerance.");
-          }
-
-          candidates.push({
-            id: `${family.replace(/[^a-z0-9]/gi, "-")}_cand_${String(index).padStart(3, "0")}`,
+          const baseCandidate: CandidateGeometry = {
+            id: `${options.idPrefix}_${family.replace(/[^a-z0-9]/gi, "-")}_cand_${String(
+              index
+            ).padStart(3, "0")}`,
             family,
             material: material.name,
             widthMm: roundTo(widthMm, 0.1),
@@ -296,8 +354,8 @@ function buildStructuralCandidates(
               ]),
               0.1
             ),
-            rejected: rejectionReasons.length > 0,
-            rejectionReasons,
+            rejected: false,
+            rejectionReasons: [],
             derivedParameters: {
               ribCount,
               gussetCount,
@@ -306,8 +364,23 @@ function buildStructuralCandidates(
               loadDirection: requirements.loadCase.direction,
               vibrationHz: requirements.loadCase.vibrationHz ?? 0,
               manufacturingProcess: requirements.manufacturing.process,
-              supportAllowed: requirements.manufacturing.supportAllowed
+              supportAllowed: requirements.manufacturing.supportAllowed,
+              boltCount: requirements.mounting.boltCount,
+              boltDiameterMm: requirements.mounting.boltDiameterMm,
+              boltSpacingMm: requirements.mounting.spacingMm,
+              overhangLimitDeg: requirements.manufacturing.maxOverhangDeg,
+              baselineMode: !options.applyConstraintFiltering
             }
+          };
+
+          const rejectionReasons = options.applyConstraintFiltering
+            ? evaluateStructuralCandidateForReview(baseCandidate, requirements)
+            : [];
+
+          candidates.push({
+            ...baseCandidate,
+            rejected: rejectionReasons.length > 0,
+            rejectionReasons
           });
         }
       }
@@ -315,6 +388,98 @@ function buildStructuralCandidates(
   }
 
   return candidates;
+}
+
+function evaluateStructuralCandidateForReview(
+  candidate: CandidateGeometry,
+  requirements: StructuralBracketRequirements
+): string[] {
+  const reasons: string[] = [];
+
+  const basePadRequirement =
+    requirements.mounting.spacingMm +
+    requirements.mounting.boltDiameterMm * 3.2;
+
+  if (candidate.widthMm > requirements.envelope.maxWidthMm) {
+    reasons.push("Exceeds maximum width envelope.");
+  }
+
+  if (candidate.heightMm > requirements.envelope.maxHeightMm) {
+    reasons.push("Exceeds maximum height envelope.");
+  }
+
+  if (candidate.depthMm > requirements.envelope.maxDepthMm) {
+    reasons.push("Exceeds maximum depth envelope.");
+  }
+
+  if (candidate.widthMm < basePadRequirement) {
+    reasons.push("Bolt pattern does not fit generated base width.");
+  }
+
+  if (candidate.wallThicknessMm < requirements.manufacturing.minWallThicknessMm) {
+    reasons.push("Wall thickness below manufacturing minimum.");
+  }
+
+  if (candidate.safetyFactorEstimate < requirements.safetyFactor) {
+    reasons.push("Estimated safety factor below requirement.");
+  }
+
+  if (candidate.manufacturabilityScore < 55) {
+    reasons.push("Manufacturability score below threshold.");
+  }
+
+  if (candidate.supportBurdenScore < 50) {
+    reasons.push("Support burden too high for first-pass fabrication readiness.");
+  }
+
+  const targetMass = requirements.objectives.targetMassKg;
+
+  if (targetMass && candidate.estimatedMassKg > targetMass * 1.75) {
+    reasons.push("Mass exceeds target mass tolerance.");
+  }
+
+  return reasons;
+}
+
+function createEmergencyStructuralCandidate(
+  family: ComponentFamily,
+  requirements: StructuralBracketRequirements
+): CandidateGeometry {
+  const widthMm = requirements.envelope.maxWidthMm;
+  const heightMm = requirements.envelope.maxHeightMm * 0.7;
+  const depthMm = requirements.envelope.maxDepthMm * 0.7;
+  const wallThicknessMm = requirements.manufacturing.minWallThicknessMm;
+
+  return {
+    id: "emergency_structural_candidate",
+    family,
+    material: "Ti-6Al-4V",
+    widthMm,
+    heightMm,
+    depthMm,
+    lengthMm: Math.max(widthMm, heightMm),
+    wallThicknessMm,
+    estimatedMassKg: 0,
+    estimatedStressMpa: 0,
+    estimatedDisplacementMm: 0,
+    safetyFactorEstimate: 0,
+    manufacturabilityScore: 0,
+    supportBurdenScore: 0,
+    performanceScore: 0,
+    totalScore: 0,
+    rejected: true,
+    rejectionReasons: ["Emergency fallback candidate created because no generated candidates were available."],
+    derivedParameters: {
+      ribCount: 0,
+      gussetCount: 0,
+      boltPadDiameterMm: requirements.mounting.boltDiameterMm * 2.4,
+      requiredLoadN: requirements.loadCase.forceN * requirements.safetyFactor,
+      loadDirection: requirements.loadCase.direction,
+      vibrationHz: requirements.loadCase.vibrationHz ?? 0,
+      manufacturingProcess: requirements.manufacturing.process,
+      supportAllowed: requirements.manufacturing.supportAllowed
+    }
+  };
 }
 
 // ==============================
@@ -329,7 +494,11 @@ function generateBellNozzle(requirements: BellNozzleRequirements): GenerationRes
     .sort((a, b) => b.totalScore - a.totalScore);
 
   const rejected = candidates.filter((candidate) => candidate.rejected);
-  const selected = accepted[0] ?? candidates.sort((a, b) => b.totalScore - a.totalScore)[0];
+
+  const selected =
+    accepted[0] ??
+    [...candidates].sort((a, b) => b.totalScore - a.totalScore)[0] ??
+    createEmergencyNozzleCandidate(requirements);
 
   const derived: DerivedGeometry = {
     widthMm: selected.widthMm,
@@ -346,7 +515,7 @@ function generateBellNozzle(requirements: BellNozzleRequirements): GenerationRes
   const validations = buildBellNozzleValidations(requirements, selected, accepted.length);
 
   return {
-    revision: "REQ-GEN-001",
+    revision: "REQ-GEN-002",
     exportState: "idle",
     estimatedMassKg: selected.estimatedMassKg,
     estimatedBurn: estimateComputeBurn(candidates.length, accepted.length),
@@ -404,6 +573,7 @@ function buildBellNozzleCandidates(requirements: BellNozzleRequirements): Candid
             index += 1;
 
             const chamberPressurePa = chamberPressureBar * 100_000;
+
             const thrustCoefficient = estimateThrustCoefficient(
               expansionRatio,
               requirements.performance.ambientPressurePa,
@@ -430,6 +600,7 @@ function buildBellNozzleCandidates(requirements: BellNozzleRequirements): Candid
                   : 1.15;
 
             const thermalWallC = chamberTemperatureC * coolingMultiplier;
+
             const wallThicknessMm = roundTo(
               Math.max(
                 requirements.manufacturing.minWallThicknessMm,
@@ -442,7 +613,8 @@ function buildBellNozzleCandidates(requirements: BellNozzleRequirements): Candid
 
             const shellVolumeMm3 =
               Math.PI *
-              ((exitDiameterMm / 2) ** 2 - Math.max(exitDiameterMm / 2 - wallThicknessMm, 1) ** 2) *
+              ((exitDiameterMm / 2) ** 2 -
+                Math.max(exitDiameterMm / 2 - wallThicknessMm, 1) ** 2) *
               lengthMm *
               0.42;
 
@@ -467,12 +639,14 @@ function buildBellNozzleCandidates(requirements: BellNozzleRequirements): Candid
             const thermalScore = clamp(
               100 -
                 Math.max(0, thermalWallC - material.maxServiceTempC) * 0.08 -
-                Math.max(0, requirements.performance.burnDurationSec - material.nominalBurnLimitSec) * 0.3,
+                Math.max(0, requirements.performance.burnDurationSec - material.nominalBurnLimitSec) *
+                  0.3,
               0,
               100
             );
 
             const targetMass = requirements.objectives.targetMassKg;
+
             const massScore = targetMass
               ? clamp(100 - Math.abs(estimatedMassKg - targetMass) * 45, 0, 100)
               : clamp(100 - estimatedMassKg * 10, 0, 100);
@@ -481,7 +655,8 @@ function buildBellNozzleCandidates(requirements: BellNozzleRequirements): Candid
               100 -
                 (requirements.manufacturing.process === "additive" ? 0 : 8) -
                 (requirements.manufacturing.supportAllowed ? 3 : 12) -
-                Math.max(0, wallThicknessMm - requirements.manufacturing.minWallThicknessMm * 2.6) * 3,
+                Math.max(0, wallThicknessMm - requirements.manufacturing.minWallThicknessMm * 2.6) *
+                  3,
               0,
               100
             );
@@ -558,7 +733,10 @@ function buildBellNozzleCandidates(requirements: BellNozzleRequirements): Candid
               wallThicknessMm,
               estimatedMassKg: roundTo(estimatedMassKg, 0.001),
               estimatedStressMpa: roundTo(chamberPressureBar * 2.1 * requirements.safetyFactor, 0.01),
-              estimatedDisplacementMm: roundTo(lengthMm / Math.max(material.elasticModulusMpa, 1) * 12, 0.0001),
+              estimatedDisplacementMm: roundTo(
+                (lengthMm / Math.max(material.elasticModulusMpa, 1)) * 12,
+                0.0001
+              ),
               safetyFactorEstimate: roundTo(material.maxServiceTempC / Math.max(thermalWallC, 1), 0.01),
               manufacturabilityScore: roundTo(manufacturabilityScore, 0.1),
               supportBurdenScore: roundTo(supportBurdenScore, 0.1),
@@ -588,6 +766,34 @@ function buildBellNozzleCandidates(requirements: BellNozzleRequirements): Candid
   return candidates;
 }
 
+function createEmergencyNozzleCandidate(requirements: BellNozzleRequirements): CandidateGeometry {
+  return {
+    id: "emergency_nozzle_candidate",
+    family: "bell-nozzle",
+    material: "Inconel 718",
+    widthMm: requirements.envelope.maxExitDiameterMm,
+    heightMm: requirements.envelope.maxExitDiameterMm,
+    depthMm: requirements.envelope.maxExitDiameterMm,
+    lengthMm: requirements.envelope.maxLengthMm,
+    wallThicknessMm: requirements.manufacturing.minWallThicknessMm,
+    estimatedMassKg: 0,
+    estimatedStressMpa: 0,
+    estimatedDisplacementMm: 0,
+    safetyFactorEstimate: 0,
+    manufacturabilityScore: 0,
+    supportBurdenScore: 0,
+    performanceScore: 0,
+    totalScore: 0,
+    rejected: true,
+    rejectionReasons: ["Emergency fallback nozzle candidate created because no generated candidates were available."],
+    derivedParameters: {
+      expansionRatio: 0,
+      chamberPressureBar: requirements.performance.chamberPressureBar ?? 0,
+      mixtureRatio: requirements.propellant.mixtureRatio ?? 0
+    }
+  };
+}
+
 // ==============================
 // VALIDATION BUILDERS
 // ==============================
@@ -595,7 +801,8 @@ function buildBellNozzleCandidates(requirements: BellNozzleRequirements): Candid
 function buildStructuralValidations(
   requirements: StructuralBracketRequirements,
   selected: CandidateGeometry,
-  acceptedCount: number
+  acceptedCount: number,
+  baselineComparison: BaselineComparison
 ): ValidationMessage[] {
   const messages: ValidationMessage[] = [];
 
@@ -604,7 +811,7 @@ function buildStructuralValidations(
     title: acceptedCount > 0 ? "Candidate Search Complete" : "Fallback Candidate Selected",
     text:
       acceptedCount > 0
-        ? `${acceptedCount} candidates satisfied the first-pass load, envelope, and manufacturability filters.`
+        ? `${acceptedCount} candidates satisfied the first-pass load, envelope, manufacturability, and support-burden filters.`
         : "No candidates fully satisfied all filters. The best-scoring fallback candidate was selected for review."
   });
 
@@ -622,6 +829,24 @@ function buildStructuralValidations(
     text: `Manufacturability score ${selected.manufacturabilityScore.toFixed(
       1
     )}/100 using ${requirements.manufacturing.process} constraints.`
+  });
+
+  messages.push({
+    severity: baselineComparison.avoidedSimulationRuns > 0 ? "success" : "warning",
+    title: "Baseline Comparison",
+    text: `Constraint-filtered generation avoided ${
+      baselineComparison.avoidedSimulationRuns
+    } estimated simulation runs compared with the unconstrained baseline, reducing simulation load by ${baselineComparison.reductionInSimulationLoadPercent.toFixed(
+      1
+    )}%.`
+  });
+
+  messages.push({
+    severity: selected.supportBurdenScore >= 65 ? "success" : "warning",
+    title: "Support Burden Review",
+    text: `Support burden score ${selected.supportBurdenScore.toFixed(
+      1
+    )}/100. This is a first-pass additive manufacturing readiness estimate, not final print qualification.`
   });
 
   if (requirements.loadCase.vibrationHz) {
@@ -849,12 +1074,15 @@ function estimateComputeBurn(evaluated: number, accepted: number) {
 
 function weightedAverage(items: Array<[number, number]>) {
   const totalWeight = items.reduce((sum, [, weight]) => sum + weight, 0);
-  if (totalWeight <= 0) return 0;
+
+  if (totalWeight <= 0) {
+    return 0;
+  }
 
   return items.reduce((sum, [value, weight]) => sum + value * weight, 0) / totalWeight;
 }
 
-function clamp(value: number, min: number, max: number) {
+function clamp(value: number, min: number, max) {
   return Math.min(max, Math.max(min, value));
 }
 
