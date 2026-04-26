@@ -106,12 +106,6 @@ export type StructuralBracketRequirements = {
   objectives: {
     targetMassKg?: number;
     priority: OptimizationPriority;
-
-    /**
-     * Structural parts can be skeletonized to reduce mass while preserving load paths.
-     * Use "sealed-required" for parts that must remain closed, such as aerodynamic shells,
-     * pressure boundaries, tanks, or nosecones.
-     */
     skeletonization?: SkeletonizationPolicy;
     targetOpenAreaPercent?: number;
   };
@@ -152,11 +146,6 @@ export type BellNozzleRequirements = {
   objectives: {
     priority: "efficiency" | "compactness" | "thermal-margin" | "balanced";
     targetMassKg?: number;
-
-    /**
-     * Nozzles are not treated as open skeletonized structures.
-     * They may have internal cooling passages later, but the pressure boundary remains sealed.
-     */
     skeletonization?: "sealed-required";
   };
 
@@ -176,6 +165,65 @@ export type GenerationInput =
       componentFamily: "pressure-vessel" | "rover-arm" | "grid-fin";
       requirements: StructuralBracketRequirements;
     };
+
+// ==============================
+// RENDERABLE GEOMETRY MODEL
+// ==============================
+
+export type Vec3 = [number, number, number];
+
+export type RenderableMeshFace = {
+  indices: number[];
+  group?: string;
+  shade?: number;
+};
+
+export type RenderableMeshFeature =
+  | {
+      type: "bolt-hole";
+      id: string;
+      center: Vec3;
+      diameterMm: number;
+      throughAxis: "x" | "y" | "z";
+    }
+  | {
+      type: "lightening-hole";
+      id: string;
+      center: Vec3;
+      diameterMm: number;
+      throughAxis: "x" | "y" | "z";
+    }
+  | {
+      type: "rib" | "gusset" | "diagonal-web" | "mounting-plate" | "load-plate";
+      id: string;
+      center: Vec3;
+      size: Vec3;
+      rotationDeg?: number;
+    };
+
+export type RenderableMesh = {
+  version: "haf-render-mesh-v1";
+  units: "mm";
+  family: ComponentFamily;
+  vertices: Vec3[];
+  faces: RenderableMeshFace[];
+  features: RenderableMeshFeature[];
+  bounds: {
+    widthMm: number;
+    heightMm: number;
+    depthMm: number;
+  };
+  metadata: {
+    candidateId: string;
+    source: "generation-engine" | "viewer-fallback";
+    boltCount?: number;
+    lighteningHoleCount?: number;
+    ribCount?: number;
+    gussetCount?: number;
+    diagonalWebCount?: number;
+    skeletonized?: boolean;
+  };
+};
 
 // ==============================
 // GENERATED CANDIDATE MODEL
@@ -211,6 +259,8 @@ export type CandidateGeometry = {
   openAreaPercent?: number;
   latticeCellCount?: number;
   loadPathContinuityScore?: number;
+
+  renderMesh?: RenderableMesh;
 
   derivedParameters: Record<string, number | string | boolean>;
 };
@@ -259,6 +309,7 @@ export type DerivedGeometry = {
   openAreaPercent?: number;
   latticeCellCount?: number;
   loadPathContinuityScore?: number;
+  renderMesh?: RenderableMesh;
   derivedParameters: Record<string, number | string | boolean>;
 };
 
@@ -275,6 +326,7 @@ export type GeometryPreview = {
   openAreaPercent?: number;
   latticeCellCount?: number;
   loadPathContinuityScore?: number;
+  renderMesh?: RenderableMesh;
   notes?: string[];
   derived?: DerivedGeometry;
   candidates?: {
