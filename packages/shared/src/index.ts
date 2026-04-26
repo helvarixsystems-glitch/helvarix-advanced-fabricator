@@ -67,6 +67,12 @@ export type LoadDirection = "vertical" | "lateral" | "multi-axis";
 export type ManufacturingProcess = "additive" | "machined";
 export type OptimizationPriority = "lightweight" | "stiffness" | "balanced";
 
+export type SkeletonizationPolicy =
+  | "none"
+  | "auto"
+  | "aggressive"
+  | "sealed-required";
+
 export type StructuralBracketRequirements = {
   componentName: string;
 
@@ -100,6 +106,14 @@ export type StructuralBracketRequirements = {
   objectives: {
     targetMassKg?: number;
     priority: OptimizationPriority;
+
+    /**
+     * Structural parts can be skeletonized to reduce mass while preserving load paths.
+     * Use "sealed-required" for parts that must remain closed, such as aerodynamic shells,
+     * pressure boundaries, tanks, or nosecones.
+     */
+    skeletonization?: SkeletonizationPolicy;
+    targetOpenAreaPercent?: number;
   };
 };
 
@@ -138,6 +152,12 @@ export type BellNozzleRequirements = {
   objectives: {
     priority: "efficiency" | "compactness" | "thermal-margin" | "balanced";
     targetMassKg?: number;
+
+    /**
+     * Nozzles are not treated as open skeletonized structures.
+     * They may have internal cooling passages later, but the pressure boundary remains sealed.
+     */
+    skeletonization?: "sealed-required";
   };
 
   safetyFactor: number;
@@ -186,6 +206,12 @@ export type CandidateGeometry = {
   rejected: boolean;
   rejectionReasons: string[];
 
+  skeletonized?: boolean;
+  skeletonizationPolicy?: SkeletonizationPolicy;
+  openAreaPercent?: number;
+  latticeCellCount?: number;
+  loadPathContinuityScore?: number;
+
   derivedParameters: Record<string, number | string | boolean>;
 };
 
@@ -228,6 +254,11 @@ export type DerivedGeometry = {
   material: string;
   estimatedMassKg: number;
   selectedCandidateId: string;
+  skeletonized?: boolean;
+  skeletonizationPolicy?: SkeletonizationPolicy;
+  openAreaPercent?: number;
+  latticeCellCount?: number;
+  loadPathContinuityScore?: number;
   derivedParameters: Record<string, number | string | boolean>;
 };
 
@@ -239,6 +270,11 @@ export type GeometryPreview = {
   heightMm?: number;
   depthMm?: number;
   wallThicknessMm: number;
+  skeletonized?: boolean;
+  skeletonizationPolicy?: SkeletonizationPolicy;
+  openAreaPercent?: number;
+  latticeCellCount?: number;
+  loadPathContinuityScore?: number;
   notes?: string[];
   derived?: DerivedGeometry;
   candidates?: {
