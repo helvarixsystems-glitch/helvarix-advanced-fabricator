@@ -1422,33 +1422,76 @@ function buildViewerGeometry(generation: GenerationSummary | null) {
   const result = generation.result;
   const selected = result.selectedCandidate;
 
+  const renderMesh =
+    result.derived?.renderMesh ??
+    result.geometry?.renderMesh ??
+    selected?.renderMesh;
+
   return {
     family: result.geometry?.silhouette ?? generation.input.componentFamily,
     silhouette: result.geometry?.silhouette ?? generation.input.componentFamily,
     material: result.derived?.material ?? result.geometry?.material ?? selected?.material,
+
     lengthMm: result.derived?.lengthMm ?? result.geometry?.lengthMm ?? selected?.lengthMm,
     widthMm: result.derived?.widthMm ?? result.geometry?.widthMm ?? selected?.widthMm,
     heightMm: result.derived?.heightMm ?? result.geometry?.heightMm ?? selected?.heightMm,
     depthMm: result.derived?.depthMm ?? result.geometry?.depthMm ?? selected?.depthMm,
+
     wallThicknessMm:
-      result.derived?.wallThicknessMm ?? result.geometry?.wallThicknessMm ?? selected?.wallThicknessMm,
+      result.derived?.wallThicknessMm ??
+      result.geometry?.wallThicknessMm ??
+      selected?.wallThicknessMm,
+
     skeletonized:
-      result.derived?.skeletonized ?? result.geometry?.skeletonized ?? selected?.skeletonized,
+      result.derived?.skeletonized ??
+      result.geometry?.skeletonized ??
+      selected?.skeletonized,
+
     skeletonizationPolicy:
       result.derived?.skeletonizationPolicy ??
       result.geometry?.skeletonizationPolicy ??
       selected?.skeletonizationPolicy,
+
     openAreaPercent:
-      result.derived?.openAreaPercent ?? result.geometry?.openAreaPercent ?? selected?.openAreaPercent,
+      result.derived?.openAreaPercent ??
+      result.geometry?.openAreaPercent ??
+      selected?.openAreaPercent,
+
     latticeCellCount:
-      result.derived?.latticeCellCount ?? result.geometry?.latticeCellCount ?? selected?.latticeCellCount,
+      result.derived?.latticeCellCount ??
+      result.geometry?.latticeCellCount ??
+      selected?.latticeCellCount,
+
     loadPathContinuityScore:
       result.derived?.loadPathContinuityScore ??
       result.geometry?.loadPathContinuityScore ??
       selected?.loadPathContinuityScore,
-    derived: result.derived,
+
+    renderMesh,
+
+    geometry: {
+      ...result.geometry,
+      renderMesh
+    },
+
+    selectedCandidate: {
+      ...selected,
+      renderMesh
+    },
+
+    derived: {
+      ...result.derived,
+      renderMesh
+    },
+
     derivedParameters: result.derived?.derivedParameters ?? selected?.derivedParameters,
-    notes: result.geometry?.notes
+
+    notes: [
+      ...(result.geometry?.notes ?? []),
+      renderMesh
+        ? `ENGINE MESH ACTIVE: ${renderMesh.vertices.length} vertices, ${renderMesh.faces.length} faces.`
+        : "WARNING: No renderMesh reached the viewer. Viewer is using fallback geometry."
+    ]
   };
 }
 
