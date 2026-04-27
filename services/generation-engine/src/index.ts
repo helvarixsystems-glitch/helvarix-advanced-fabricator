@@ -13,6 +13,27 @@ import type {
   Vec3
 } from "@haf/shared";
 
+declare const process:
+  | {
+      env?: Record<string, string | undefined>;
+    }
+  | undefined;
+
+const DEFAULT_FENICS_SOLVER_URL = "https://helvarix-solver-worker.onrender.com";
+const FENICS_DENSITY_THRESHOLD = 0.42;
+
+type FenicsDensityResult = {
+  ok?: boolean;
+  engine?: string;
+  density?: number[][][];
+  error?: string;
+};
+
+type FenicsDensitySample = {
+  value: number;
+  normalized: number;
+};
+
 export async function generateComponent(input: GenerationInput): Promise<GenerationResult> {
   if (input.componentFamily === "bell-nozzle") {
     return generateBellNozzle(input.requirements);
@@ -48,10 +69,10 @@ type StructuralDesignParameters = {
   skeletonLevel: "none" | "light" | "moderate" | "aggressive";
 };
 
-function generateStructuralPart(
+async function generateStructuralPart(
   family: ComponentFamily,
   requirements: StructuralBracketRequirements
-): GenerationResult {
+): Promise<GenerationResult> {
   const filteredCandidates = buildStructuralCandidates(family, requirements, {
     applyConstraintFiltering: true,
     idPrefix: "filtered"
@@ -75,7 +96,7 @@ function generateStructuralPart(
 
   const selected: CandidateGeometry = {
     ...selectedWithoutMesh,
-    renderMesh: buildStructuralRenderMesh(selectedWithoutMesh, requirements)
+    renderMesh: await buildStructuralRenderMesh(selectedWithoutMesh, requirements)
   };
 
   const reviewedBaseline = baselineCandidates
@@ -568,12 +589,609 @@ function buildStructuralCandidates(
   return candidates;
 }
 
-function buildStructuralRenderMesh(
+async function buildStructuralRenderMesh(
   candidate: CandidateGeometry,
   requirements: StructuralBracketRequirements
-): RenderableMesh {
+): Promise<RenderableMesh> {
+  const fenics = await fetchFenicsDensity({
+    nx: 36,
+    ny: 36,
+    nz: 12,
+    loadDirection: requirements.loadCase.direction
+  });
+
+  if (fenics?.density && isValidDensityField(fenics.density)) {
+    candidate.derivedParameters.fenicsEngine = fenics.engine ?? "fenics-topology-placeholder";
+    candidate.derivedParameters.fenicsStatus = "connected";
+    candidate.derivedParameters.fenicsGrid = {
+      nx: fenics.density.length,
+      ny: fenics.density[0]?.length ?? 0,
+      nz: fenics.density[0]?.[0]?.length ?? 0
+    };
+
+    return buildFenicsDensityDrivenStructuralMesh(candidate, requirements, fenics.density);
+  }
+
+  candidate.derivedParameters.fenicsStatus = "fallback-local-topology";
+  if (fenics?.error) {
+    candidate.derivedParameters.fenicsError = fenics.error;
+  }
+
   return buildTopologyOptimizedStructuralMesh(candidate, requirements);
 }
+
+async function fetchFenicsDensity(input: {
+  nx: number;
+  ny: number;
+  nz: number;
+  loadDirection: string;
+}): Promise<FenicsDensityResult | undefined> {
+  const solverUrl = getFenicsSolverUrl();
+
+  if (!solverUrl) {
+    return {
+      ok: false,
+      error: "HELVARIX_SOLVER_URL is not configured and no default solver URL is available."
+    };
+  }
+
+  try {
+    const response = await fetch(`${solverUrl.replace(/\/$/, "")}/fenics-test`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(input)
+    });
+
+    const data = (await response.json()) as FenicsDensityResult;
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: data?.error ?? `FEniCS solver returned HTTP ${response.status}`
+      };
+    }
+
+    return data;
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err)
+    };
+  }
+}
+
+function getFenicsSolverUrl() {
+  const processEnv = typeof process !== "undefined" ? process.env : undefined;
+
+  return (
+    processEnv?.HELVARIX_SOLVER_URL?.trim() ||
+    processEnv?.VITE_HELVARIX_SOLVER_URL?.trim() ||
+    DEFAULT_FENICS_SOLVER_URL
+  );
+}
+
+function isValidDensityField(value: unknown): value is number[][][] {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  if (!Array.isArray(value[0]) || value[0].length === 0) return false;
+  if (!Array.isArray(value[0][0]) || value[0][0].length === 0) return false;
+
+  return typeof value[0][0][0] === "number";
+}
+
+
+function buildFenicsDensityDrivenStructuralMesh(
+  candidate: CandidateGeometry,
+  requirements: StructuralBracketRequirements,
+  density: number[][][]
+): RenderableMesh {
+  const mesh = createMeshBuilder();
+
+  const width = candidate.widthMm;
+  const height = candidate.heightMm;
+  const depth = candidate.depthMm;
+  const wall = candidate.wallThicknessMm;
+
+  const boltCount = clamp(Math.round(requirements.mounting.boltCount), 1, 12);
+  const boltDiameterMm = Math.max(requirements.mounting.boltDiameterMm, wall * 0.9);
+  const railHeight = Math.max(wall * 2.05, height * 0.105);
+  const boltPositions = buildBoltPositions(width, height, railHeight, boltCount);
+  const loadPoints = buildFenicsLoadPoints(width, height, wall, requirements);
+
+  const field = createFenicsTopologyField({
+    width,
+    height,
+    wall,
+    boltPositions,
+    boltDiameterMm,
+    loadPoints,
+    density
+  });
+
+  addPerimeterSkin(mesh, {
+    width,
+    height,
+    depth,
+    wall,
+    field
+  });
+
+  addFenicsOrganicSkeleton(mesh, {
+    width,
+    height,
+    depth,
+    wall,
+    density,
+    field,
+    candidate,
+    requirements
+  });
+
+  addBoltHoleWallFeatures(mesh, {
+    boltPositions,
+    boltDiameterMm,
+    depth,
+    wall
+  });
+
+  addLoadInterfaceFeatures(mesh, {
+    width,
+    height,
+    depth,
+    wall,
+    requirements
+  });
+
+  const loadPathMembers = mesh.features.filter((feature) =>
+    feature.type === "diagonal-web" || feature.type === "gusset" || feature.type === "rib"
+  ).length;
+
+  const densityStats = summarizeDensity(density);
+  const actualOpenAreaPercent = roundTo(field.actualOpenAreaPercent, 0.1);
+
+  candidate.derivedParameters.fenicsAverageDensity = roundTo(densityStats.average, 0.001);
+  candidate.derivedParameters.fenicsSolidFraction = roundTo(densityStats.solidFraction, 0.001);
+  candidate.derivedParameters.fenicsOpenAreaPercent = actualOpenAreaPercent;
+  candidate.derivedParameters.topologyMode = "fenics-density-field";
+  candidate.derivedParameters.topologyPostProcessing =
+    "FEniCS density field, thresholded load paths, density-guided member thickness, manufacturable node and beam reconstruction";
+  candidate.derivedParameters.topologySkeletonMembers = loadPathMembers;
+
+  return {
+    version: "haf-render-mesh-v1",
+    units: "mm",
+    family: candidate.family,
+    vertices: mesh.vertices,
+    faces: mesh.faces,
+    features: mesh.features,
+    bounds: {
+      widthMm: width,
+      heightMm: height,
+      depthMm: depth
+    },
+    metadata: {
+      candidateId: candidate.id,
+      source: "fenics-density-field",
+      boltCount,
+      lighteningHoleCount: Math.max(0, Math.round(actualOpenAreaPercent / 7)),
+      ribCount: Math.max(1, Math.round(loadPathMembers * 0.25)),
+      gussetCount: Math.max(0, Math.round(loadPathMembers * 0.35)),
+      diagonalWebCount: Math.max(1, Math.round(loadPathMembers * 0.4)),
+      skeletonized: true
+    }
+  };
+}
+
+function createFenicsTopologyField(args: {
+  width: number;
+  height: number;
+  wall: number;
+  boltPositions: Array<[number, number]>;
+  boltDiameterMm: number;
+  loadPoints: Array<[number, number]>;
+  density: number[][][];
+}): TopologyField {
+  const { width, height, wall, boltPositions, boltDiameterMm, loadPoints, density } = args;
+
+  const columns = density.length;
+  const rows = density[0]?.length ?? 1;
+  const cellWidth = width / Math.max(columns, 1);
+  const cellHeight = height / Math.max(rows, 1);
+  const boltHoleRadius = Math.max(boltDiameterMm * 0.52, wall * 0.55);
+  const boltPadRadius = Math.max(boltDiameterMm * 1.85, wall * 2.45);
+
+  const occupied = Array.from({ length: rows }, () =>
+    Array.from({ length: columns }, () => false)
+  );
+
+  const cells: TopologyCell[] = [];
+
+  for (let row = 0; row < rows; row += 1) {
+    const y = -height / 2 + (row + 0.5) * cellHeight;
+
+    for (let column = 0; column < columns; column += 1) {
+      const x = -width / 2 + (column + 0.5) * cellWidth;
+      const sample = sampleFenicsDensity(density, x, y, 0, width, height);
+      const insideBoltVoid = boltPositions.some(([bx, by]) => {
+        return distance2d(x, y, bx, by) < boltHoleRadius;
+      });
+
+      const nearAnchor = boltPositions.some(([bx, by]) => {
+        return distance2d(x, y, bx, by) < boltPadRadius * 1.1;
+      });
+
+      const nearLoad = loadPoints.some(([lx, ly]) => {
+        return distance2d(x, y, lx, ly) < Math.max(wall * 3.4, width * 0.06);
+      });
+
+      const keep = !insideBoltVoid && (nearAnchor || nearLoad || sample.normalized >= FENICS_DENSITY_THRESHOLD);
+      occupied[row][column] = keep;
+
+      if (keep) {
+        cells.push({
+          column,
+          row,
+          x,
+          y,
+          density: sample.normalized,
+          stress: sample.normalized,
+          group: nearAnchor ? "bolt-load-pad" : nearLoad ? "load-interface" : "fenics-density-field"
+        });
+      }
+    }
+  }
+
+  const total = Math.max(columns * rows, 1);
+  const actualOpenAreaPercent = ((total - cells.length) / total) * 100;
+
+  return {
+    columns,
+    rows,
+    cellWidth,
+    cellHeight,
+    occupied,
+    cells,
+    boltPositions,
+    boltHoleRadius,
+    boltPadRadius,
+    loadPoints,
+    targetOpenAreaPercent: actualOpenAreaPercent,
+    actualOpenAreaPercent,
+    threshold: FENICS_DENSITY_THRESHOLD
+  };
+}
+
+function buildFenicsLoadPoints(
+  width: number,
+  height: number,
+  wall: number,
+  requirements: StructuralBracketRequirements
+): Array<[number, number]> {
+  const topY = height / 2 - Math.max(wall * 2.4, height * 0.08);
+  const spread = requirements.loadCase.direction === "lateral" ? height * 0.22 : width * 0.18;
+
+  if (requirements.loadCase.direction === "lateral") {
+    return [
+      [width * 0.38, height * 0.18],
+      [width * 0.38, -height * 0.18]
+    ];
+  }
+
+  if (requirements.loadCase.direction === "multi-axis") {
+    return [
+      [0, topY],
+      [-spread, topY - height * 0.07],
+      [spread, topY - height * 0.07]
+    ];
+  }
+
+  return [
+    [0, topY],
+    [-spread, topY],
+    [spread, topY]
+  ];
+}
+
+function addFenicsOrganicSkeleton(
+  mesh: MeshBuilder,
+  args: {
+    width: number;
+    height: number;
+    depth: number;
+    wall: number;
+    density: number[][][];
+    field: TopologyField;
+    candidate: CandidateGeometry;
+    requirements: StructuralBracketRequirements;
+  }
+) {
+  const { width, height, depth, wall, density, field, candidate, requirements } = args;
+
+  const boltPositions = field.boltPositions;
+  const loadPoints = field.loadPoints;
+  const loadCenter = averagePoints(loadPoints);
+  const boltCenter = averagePoints(boltPositions);
+  const loadScale = clamp(requirements.loadCase.forceN / 2500, 0.72, 1.55);
+  const vibrationScale = clamp((requirements.loadCase.vibrationHz ?? 0) / 150, 0, 1.25);
+  const baseThickness = Math.max(wall * 1.05, Math.min(width, height) * 0.042) * loadScale;
+  const memberDepth = depth * 0.82;
+  const z = -memberDepth / 2;
+
+  const coreNode: [number, number] = [
+    clamp((loadCenter[0] + boltCenter[0]) / 2, -width * 0.18, width * 0.18),
+    clamp((loadCenter[1] + boltCenter[1]) / 2, -height * 0.14, height * 0.22)
+  ];
+
+  const upperNode: [number, number] = [
+    clamp(loadCenter[0], -width * 0.16, width * 0.16),
+    clamp(height * 0.22, -height * 0.05, height * 0.34)
+  ];
+
+  const coreDensity = sampleFenicsDensity(density, coreNode[0], coreNode[1], 0, width, height).normalized;
+  const upperDensity = sampleFenicsDensity(density, upperNode[0], upperNode[1], 0, width, height).normalized;
+
+  addSolidNodePad(mesh, {
+    id: "fenics-core-load-node",
+    group: "rib",
+    center: [coreNode[0], coreNode[1], 0],
+    radius: baseThickness * (0.9 + coreDensity * 0.65),
+    depth: memberDepth,
+    segments: 28,
+    shade: 0.72
+  });
+
+  addSolidNodePad(mesh, {
+    id: "fenics-upper-load-node",
+    group: "load-plate",
+    center: [upperNode[0], upperNode[1], 0],
+    radius: baseThickness * (0.72 + upperDensity * 0.54),
+    depth: memberDepth,
+    segments: 28,
+    shade: 0.78
+  });
+
+  boltPositions.forEach((bolt, index) => {
+    const start = offsetPointAlongSegment(bolt, coreNode, field.boltPadRadius * 0.68);
+    const side = bolt[0] < 0 ? -1 : 1;
+    const bow = requirements.loadCase.direction === "vertical"
+      ? [side * width * 0.05, height * 0.055] as [number, number]
+      : [width * 0.055, side * height * 0.05] as [number, number];
+
+    addDensityGuidedOrganicPath(mesh, {
+      id: `fenics-bolt-${index + 1}-to-core`,
+      group: "diagonal-web",
+      from: start,
+      to: coreNode,
+      control: [
+        (start[0] + coreNode[0]) / 2 + bow[0],
+        (start[1] + coreNode[1]) / 2 + bow[1]
+      ],
+      z,
+      depth: memberDepth,
+      baseThickness,
+      density,
+      width,
+      height,
+      shade: 0.66
+    });
+  });
+
+  addDensityGuidedOrganicPath(mesh, {
+    id: "fenics-core-to-upper-load",
+    group: "diagonal-web",
+    from: coreNode,
+    to: upperNode,
+    control: [
+      (coreNode[0] + upperNode[0]) / 2,
+      Math.max(coreNode[1], upperNode[1]) + height * 0.035
+    ],
+    z,
+    depth: memberDepth,
+    baseThickness: baseThickness * 0.92,
+    density,
+    width,
+    height,
+    shade: 0.7
+  });
+
+  loadPoints.forEach((loadPoint, index) => {
+    const end = offsetPointAlongSegment(loadPoint, upperNode, Math.max(wall * 1.7, baseThickness * 0.65));
+
+    addDensityGuidedOrganicPath(mesh, {
+      id: `fenics-upper-node-to-load-${index + 1}`,
+      group: "gusset",
+      from: upperNode,
+      to: end,
+      control: [
+        (upperNode[0] + end[0]) / 2,
+        (upperNode[1] + end[1]) / 2 + height * 0.018
+      ],
+      z,
+      depth: memberDepth * 0.92,
+      baseThickness: baseThickness * 0.62,
+      density,
+      width,
+      height,
+      shade: 0.62
+    });
+  });
+
+  if (boltPositions.length >= 2) {
+    for (let index = 0; index < boltPositions.length - 1; index += 1) {
+      const a = offsetPointAlongSegment(boltPositions[index], boltPositions[index + 1], field.boltPadRadius * 0.64);
+      const b = offsetPointAlongSegment(boltPositions[index + 1], boltPositions[index], field.boltPadRadius * 0.64);
+
+      addDensityGuidedOrganicPath(mesh, {
+        id: `fenics-bolt-tension-tie-${index + 1}`,
+        group: "gusset",
+        from: a,
+        to: b,
+        control: [(a[0] + b[0]) / 2, Math.min(a[1], b[1]) - height * 0.035],
+        z,
+        depth: memberDepth * 0.74,
+        baseThickness: baseThickness * 0.48,
+        density,
+        width,
+        height,
+        shade: 0.54
+      });
+    }
+  }
+
+  if (vibrationScale > 0.15) {
+    const stabilizerThickness = baseThickness * (0.34 + vibrationScale * 0.18);
+    const leftAnchor: [number, number] = [-width * 0.28, coreNode[1] - height * 0.06];
+    const rightAnchor: [number, number] = [width * 0.28, coreNode[1] + height * 0.045];
+
+    addDensityGuidedOrganicPath(mesh, {
+      id: "fenics-vibration-stabilizer",
+      group: "rib",
+      from: leftAnchor,
+      to: rightAnchor,
+      control: [0, coreNode[1] + height * 0.02],
+      z,
+      depth: memberDepth * 0.56,
+      baseThickness: stabilizerThickness,
+      density,
+      width,
+      height,
+      shade: 0.5
+    });
+  }
+
+  if (requirements.objectives.priority !== "lightweight") {
+    const sideDensityLeft = sampleFenicsDensity(density, -width * 0.33, coreNode[1], 0, width, height).normalized;
+    const sideDensityRight = sampleFenicsDensity(density, width * 0.33, coreNode[1], 0, width, height).normalized;
+
+    for (const [side, sideDensity] of [[-1, sideDensityLeft], [1, sideDensityRight]] as const) {
+      if (sideDensity < FENICS_DENSITY_THRESHOLD * 0.65) continue;
+
+      const sideNode: [number, number] = [side * width * 0.34, coreNode[1]];
+      addDensityGuidedOrganicPath(mesh, {
+        id: `fenics-side-stability-path-${side < 0 ? "left" : "right"}`,
+        group: "rib",
+        from: coreNode,
+        to: sideNode,
+        control: [
+          (coreNode[0] + sideNode[0]) / 2,
+          coreNode[1] + side * height * 0.02
+        ],
+        z,
+        depth: memberDepth * 0.62,
+        baseThickness: baseThickness * 0.38,
+        density,
+        width,
+        height,
+        shade: 0.48
+      });
+    }
+  }
+}
+
+function addDensityGuidedOrganicPath(
+  mesh: MeshBuilder,
+  options: {
+    id: string;
+    group: "gusset" | "diagonal-web" | "rib";
+    from: [number, number];
+    to: [number, number];
+    control: [number, number];
+    z: number;
+    depth: number;
+    baseThickness: number;
+    density: number[][][];
+    width: number;
+    height: number;
+    shade: number;
+  }
+) {
+  const segments = 5;
+  let previous = options.from;
+
+  for (let index = 1; index <= segments; index += 1) {
+    const t = index / segments;
+    const point = quadraticPoint(options.from, options.control, options.to, t);
+    const mid = [(previous[0] + point[0]) / 2, (previous[1] + point[1]) / 2] as [number, number];
+    const sample = sampleFenicsDensity(options.density, mid[0], mid[1], 0, options.width, options.height);
+    const thickness = options.baseThickness * clamp(0.72 + sample.normalized * 0.72, 0.62, 1.58);
+
+    addOrientedWebFeature(mesh, {
+      id: `${options.id}-segment-${index}`,
+      group: options.group === "rib" ? "gusset" : options.group,
+      start: [previous[0], previous[1], options.z],
+      end: [point[0], point[1], options.z],
+      thickness,
+      depth: options.depth,
+      shade: options.shade + sample.normalized * 0.12
+    });
+
+    previous = point;
+  }
+}
+
+function quadraticPoint(
+  from: [number, number],
+  control: [number, number],
+  to: [number, number],
+  t: number
+): [number, number] {
+  const omt = 1 - t;
+  return [
+    omt * omt * from[0] + 2 * omt * t * control[0] + t * t * to[0],
+    omt * omt * from[1] + 2 * omt * t * control[1] + t * t * to[1]
+  ];
+}
+
+function sampleFenicsDensity(
+  density: number[][][],
+  xMm: number,
+  yMm: number,
+  zMm: number,
+  widthMm: number,
+  heightMm: number
+): FenicsDensitySample {
+  const nx = density.length;
+  const ny = density[0]?.length ?? 1;
+  const nz = density[0]?.[0]?.length ?? 1;
+
+  const xIndex = clamp(Math.round(((xMm + widthMm / 2) / Math.max(widthMm, 1)) * (nx - 1)), 0, nx - 1);
+  const yIndex = clamp(Math.round(((yMm + heightMm / 2) / Math.max(heightMm, 1)) * (ny - 1)), 0, ny - 1);
+  const zIndex = clamp(Math.round(((zMm + 0.5) / 1) * (nz - 1)), 0, nz - 1);
+
+  const raw = density[xIndex]?.[yIndex]?.[zIndex] ?? 0;
+  const value = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+
+  return {
+    value,
+    normalized: clamp(value, 0, 1)
+  };
+}
+
+function summarizeDensity(density: number[][][]) {
+  let sum = 0;
+  let count = 0;
+  let solid = 0;
+
+  for (const plane of density) {
+    for (const row of plane) {
+      for (const value of row) {
+        const normalized = typeof value === "number" && Number.isFinite(value) ? clamp(value, 0, 1) : 0;
+        sum += normalized;
+        count += 1;
+        if (normalized >= FENICS_DENSITY_THRESHOLD) {
+          solid += 1;
+        }
+      }
+    }
+  }
+
+  return {
+    average: count > 0 ? sum / count : 0,
+    solidFraction: count > 0 ? solid / count : 0
+  };
+}
+
 
 type TopologyCell = {
   column: number;
