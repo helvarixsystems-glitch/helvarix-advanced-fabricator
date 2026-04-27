@@ -483,111 +483,229 @@ function buildDensitySurfaceMesh(
   const loadPoints = buildLoadPoints(width, height, wall, requirements);
   const loadPoint = averagePoints(loadPoints);
 
-  const topologyField = buildManufacturableTopologyOccupancy(density, {
+  // The prior version rendered the density field voxel-by-voxel. That made the output look
+  // like a blocky sampled volume rather than an engineered part. This pass keeps the density
+  // field as the physics signal, but reconstructs manufacturable topology from it: fixed
+  // interfaces, density-weighted load routes, variable member radii, and open voids.
+  const field = topologyOptimizeDensityField(density, {
     width,
     height,
-    depth,
-    wall,
     boltPositions,
     loadPoints,
     boltDiameterMm,
     requirements
   });
 
+  const stressScale = clamp(requirements.loadCase.forceN / 2500, 0.78, 1.75);
+  const vibrationScale = clamp((requirements.loadCase.vibrationHz ?? 0) / 180, 0, 1.35);
+  const memberDepth = depth * 0.74;
   const landDepth = depth * 0.9;
-  const baseLandWidth = clamp(requirements.mounting.spacingMm + boltDiameterMm * 4.5, width * 0.64, width * 0.95);
+  const minimumRadius = Math.max(wall * 0.72, Math.min(width, height) * 0.023);
+  const primaryRadius = Math.max(wall * 1.1, Math.min(width, height) * 0.04) * stressScale;
+  const secondaryRadius = Math.max(wall * 0.72, Math.min(width, height) * 0.026) * (1 + vibrationScale * 0.16);
+
+  const baseLandWidth = clamp(requirements.mounting.spacingMm + boltDiameterMm * 4.6, width * 0.64, width * 0.95);
   const baseLandHeight = Math.max(wall * 2.7, height * 0.09);
   const baseY0 = Math.min(...boltPositions.map((point) => point[1])) - baseLandHeight * 0.58;
   const baseY1 = baseY0 + baseLandHeight;
-  const loadLandWidth = requirements.loadCase.direction === "lateral" ? width * 0.34 : width * 0.48;
+
+  const loadLandWidth = requirements.loadCase.direction === "lateral" ? width * 0.34 : width * 0.46;
   const loadLandHeight = Math.max(wall * 2.6, height * 0.09);
   const loadLandCenter: [number, number] = [
     clamp(loadPoint[0], -width * 0.18, width * 0.18),
     clamp(loadPoint[1], height * 0.28, height * 0.44)
   ];
 
-  enforceSolidBox(topologyField, {
-    width,
-    height,
-    depth,
-    min: [-baseLandWidth / 2, baseY0, -landDepth / 2],
-    max: [baseLandWidth / 2, baseY1, landDepth / 2]
-  });
-
-  enforceSolidBox(topologyField, {
-    width,
-    height,
-    depth,
-    min: [loadLandCenter[0] - loadLandWidth / 2, loadLandCenter[1] - loadLandHeight / 2, -landDepth / 2],
-    max: [loadLandCenter[0] + loadLandWidth / 2, loadLandCenter[1] + loadLandHeight / 2, landDepth / 2]
-  });
-
-  for (const [x, y] of boltPositions) {
-    enforceSolidEllipticalPad(topologyField, {
-      width,
-      height,
-      depth,
-      center: [x, y],
-      radiusX: Math.max(boltDiameterMm * 1.62, wall * 2.45),
-      radiusY: Math.max(boltDiameterMm * 1.48, wall * 2.18),
-      zHalfDepth: landDepth / 2
-    });
-  }
-
-  enforceSolidEllipticalPad(topologyField, {
-    width,
-    height,
-    depth,
-    center: [loadLandCenter[0], loadLandCenter[1] - loadLandHeight * 0.55],
-    radiusX: Math.max(loadLandWidth * 0.23, wall * 2.2),
-    radiusY: Math.max(loadLandHeight * 0.84, wall * 2.1),
-    zHalfDepth: landDepth * 0.46
-  });
-
-  carveCylindricalVoids(topologyField.occupied, {
-    width,
-    height,
-    boltPositions,
-    radiusMm: Math.max(boltDiameterMm * 0.52, wall * 0.55)
-  });
-
-  removeIsolatedTopologyVoxels(topologyField.occupied, 3);
-  closeSmallTopologyVoids(topologyField.occupied, 2);
-
-  addOccupiedVoxelSurface(mesh, {
-    occupied: topologyField.occupied,
-    width,
-    height,
-    depth,
-    cellWidth: width / Math.max(topologyField.nx, 1),
-    cellHeight: height / Math.max(topologyField.ny, 1),
-    cellDepth: depth / Math.max(topologyField.nz, 1)
-  });
-
-  addTopologyInterfaceFace(mesh, {
-    id: "topopt-flat-mounting-land-face",
+  // Flat mounting and load surfaces remain intentionally parametric. A topology output still
+  // needs datum faces and seating lands to be manufacturable and usable.
+  addBoxFeature(mesh, {
+    id: "topopt-flat-mounting-land",
     group: "mounting-plate",
     min: [-baseLandWidth / 2, baseY0, -landDepth / 2],
     max: [baseLandWidth / 2, baseY1, landDepth / 2],
-    shade: 0.58
+    shade: 0.56
   });
 
-  addTopologyInterfaceFace(mesh, {
-    id: "topopt-flat-load-interface-face",
+  addBoxFeature(mesh, {
+    id: "topopt-flat-load-interface-land",
     group: "load-plate",
     min: [loadLandCenter[0] - loadLandWidth / 2, loadLandCenter[1] - loadLandHeight / 2, -landDepth / 2],
     max: [loadLandCenter[0] + loadLandWidth / 2, loadLandCenter[1] + loadLandHeight / 2, landDepth / 2],
-    shade: 0.64
+    shade: 0.62
   });
+
+  for (const [x, y] of boltPositions) {
+    addFlatBossPad(mesh, {
+      id: `topopt-bolt-seat-${mesh.features.length + 1}`,
+      group: "mounting-plate",
+      center: [x, y, 0],
+      radiusX: Math.max(boltDiameterMm * 1.58, wall * 2.32),
+      radiusY: Math.max(boltDiameterMm * 1.46, wall * 2.12),
+      depth: landDepth * 1.05,
+      segments: 36,
+      shade: 0.64
+    });
+  }
+
+  addFlatBossPad(mesh, {
+    id: "topopt-load-spreader-boss",
+    group: "load-plate",
+    center: [loadLandCenter[0], loadLandCenter[1] - loadLandHeight * 0.55, 0],
+    radiusX: Math.max(loadLandWidth * 0.22, wall * 2.2),
+    radiusY: Math.max(loadLandHeight * 0.78, wall * 2.1),
+    depth: landDepth * 0.92,
+    segments: 36,
+    shade: 0.68
+  });
+
+  const hub = topologyFindLoadHub(field, width, height, boltPositions, loadLandCenter);
+  const hubDensity = topologySampleField(field, hub[0], hub[1], width, height);
+  addOrganicNodePad(mesh, {
+    id: "topopt-compliance-load-hub",
+    group: "diagonal-web",
+    center: [hub[0], hub[1], 0],
+    radius: primaryRadius * clamp(0.78 + hubDensity * 0.34, 0.76, 1.14),
+    depth: memberDepth,
+    segments: 34,
+    shade: 0.66
+  });
+
+  const pathSummaries: Array<{ id: string; lengthMm: number }> = [];
+
+  boltPositions.forEach((bolt, index) => {
+    const bossExit = offsetPointAlongSegment(bolt, hub, Math.max(primaryRadius * 1.55, boltDiameterMm * 1.12));
+    const routed = topologyTraceOptimalPath(field, {
+      from: hub,
+      to: bossExit,
+      width,
+      height,
+      preferCompressionArch: requirements.loadCase.direction === "vertical",
+      sideBias: bolt[0] < hub[0] ? -1 : 1
+    });
+    const smoothed = topologySmoothPath(routed, width, height);
+    const points = smoothed.map(([x, y]) => [x, y, 0] as Vec3);
+
+    addTopologyOptimizedMember(mesh, {
+      id: `topopt-density-primary-load-path-${index + 1}`,
+      group: "diagonal-web",
+      points,
+      baseRadius: primaryRadius,
+      minRadius: minimumRadius,
+      depth: memberDepth,
+      width,
+      height,
+      field,
+      shade: 0.68
+    });
+
+    pathSummaries.push({
+      id: `primary-${index + 1}`,
+      lengthMm: roundTo(polylineLength(points), 0.1)
+    });
+  });
+
+  const neckPath = topologySmoothPath(
+    [
+      [loadLandCenter[0], loadLandCenter[1] - loadLandHeight * 0.66],
+      [hub[0], (hub[1] + loadLandCenter[1]) / 2],
+      hub
+    ],
+    width,
+    height
+  );
+
+  addTopologyOptimizedMember(mesh, {
+    id: "topopt-load-introduction-neck",
+    group: "diagonal-web",
+    points: neckPath.map(([x, y]) => [x, y, 0] as Vec3),
+    baseRadius: primaryRadius * 0.82,
+    minRadius: minimumRadius,
+    depth: memberDepth * 0.92,
+    width,
+    height,
+    field,
+    shade: 0.7
+  });
+
+  if (boltPositions.length >= 2) {
+    const sortedBolts = [...boltPositions].sort((a, b) => a[0] - b[0]);
+    const left = sortedBolts[0];
+    const right = sortedBolts[sortedBolts.length - 1];
+    const leftStart = offsetPointAlongSegment(left, right, Math.max(boltDiameterMm * 1.25, secondaryRadius * 1.7));
+    const rightStart = offsetPointAlongSegment(right, left, Math.max(boltDiameterMm * 1.25, secondaryRadius * 1.7));
+    const tiePath = topologySmoothPath(
+      [
+        leftStart,
+        [(leftStart[0] + rightStart[0]) / 2, Math.min(leftStart[1], rightStart[1]) - height * 0.028],
+        rightStart
+      ],
+      width,
+      height
+    );
+
+    addTopologyOptimizedMember(mesh, {
+      id: "topopt-bottom-tension-tie",
+      group: "rib",
+      points: tiePath.map(([x, y]) => [x, y, 0] as Vec3),
+      baseRadius: secondaryRadius * 0.92,
+      minRadius: minimumRadius * 0.82,
+      depth: memberDepth * 0.82,
+      width,
+      height,
+      field,
+      shade: 0.5
+    });
+
+    // Thin shear webs keep the output bracket-like without filling the whole design space.
+    addTopologyShearWeb(mesh, {
+      id: "topopt-left-open-shear-web",
+      from: offsetPointAlongSegment(left, hub, Math.max(primaryRadius * 1.85, boltDiameterMm * 1.35)),
+      apex: [hub[0] - primaryRadius * 0.46, hub[1] - primaryRadius * 0.18],
+      bridge: [(leftStart[0] + hub[0]) / 2, baseY1 + wall * 0.55],
+      depth: depth * 0.18,
+      shade: 0.4
+    });
+
+    addTopologyShearWeb(mesh, {
+      id: "topopt-right-open-shear-web",
+      from: offsetPointAlongSegment(right, hub, Math.max(primaryRadius * 1.85, boltDiameterMm * 1.35)),
+      apex: [hub[0] + primaryRadius * 0.46, hub[1] - primaryRadius * 0.18],
+      bridge: [(rightStart[0] + hub[0]) / 2, baseY1 + wall * 0.55],
+      depth: depth * 0.18,
+      shade: 0.4
+    });
+  }
+
+  if (vibrationScale > 0.15) {
+    const stabilizerY = clamp(hub[1] - height * 0.08, baseY1 + wall * 1.4, hub[1] - wall);
+    addTopologyOptimizedMember(mesh, {
+      id: "topopt-vibration-stabilizer-web",
+      group: "gusset",
+      points: [
+        [-width * 0.29, stabilizerY, 0],
+        [0, stabilizerY + height * 0.035, 0],
+        [width * 0.29, stabilizerY, 0]
+      ],
+      baseRadius: secondaryRadius * clamp(0.58 + vibrationScale * 0.16, 0.54, 0.88),
+      minRadius: minimumRadius * 0.7,
+      depth: memberDepth * 0.54,
+      width,
+      height,
+      field,
+      shade: 0.46
+    });
+  }
 
   addBoltHoleWallFeatures(mesh, { boltPositions, boltDiameterMm, depth, wall });
 
-  candidate.derivedParameters.geometrySource = "fenics-density-iso-surface-topology";
+  candidate.derivedParameters.geometrySource = "fenics-density-compliance-topology-reconstruction";
   candidate.derivedParameters.topologyPostProcessing =
-    "FEniCS density field is projected into a manufacturable solid occupancy, smoothed, cleaned, constrained at load and mounting interfaces, bolt holes are cut, and the resulting density field is surfaced directly instead of being converted into decorative beams.";
+    "FEniCS density is no longer surfaced as block voxels. The field is smoothed/projected, density-weighted compliance routes are traced from load interface to bolt constraints, and the output is reconstructed as manufacturable topology with open voids, flat datum lands, bolt bosses, variable-radius primary members, shear webs, and a bottom tension tie.";
   candidate.derivedParameters.fenicsDensityThreshold = DENSITY_THRESHOLD;
-  candidate.derivedParameters.topologyOptimizationStage = "density-field-iso-surface-with-manufacturing-constraints";
-  candidate.derivedParameters.topologySolidFractionAfterCleanup = roundTo(countOccupied(topologyField.occupied).solid / Math.max(countOccupied(topologyField.occupied).total, 1), 0.001);
+  candidate.derivedParameters.topologyOptimizationStage = "density-weighted-compliance-routing-not-voxel-preview";
+  candidate.derivedParameters.topologyPrimaryPathCount = pathSummaries.length;
+  candidate.derivedParameters.topologyPrimaryPaths = pathSummaries;
+  candidate.derivedParameters.topologyHub = { xMm: roundTo(hub[0], 0.1), yMm: roundTo(hub[1], 0.1) };
 
   const ribCount = mesh.features.filter((feature) => feature.type === "rib").length;
   const gussetCount = mesh.features.filter((feature) => feature.type === "gusset").length;
@@ -603,9 +721,9 @@ function buildDensitySurfaceMesh(
     bounds: { widthMm: width, heightMm: height, depthMm: depth },
     metadata: {
       candidateId: candidate.id,
-      source: "fenics-density-iso-surface-topology",
+      source: "fenics-density-compliance-topology-reconstruction",
       boltCount,
-      lighteningHoleCount: Math.max(1, Math.round(stats.openAreaPercent / 14)),
+      lighteningHoleCount: Math.max(1, Math.round(stats.openAreaPercent / 16)),
       ribCount,
       gussetCount,
       diagonalWebCount,
@@ -613,6 +731,7 @@ function buildDensitySurfaceMesh(
     }
   };
 }
+
 
 type TopologyOccupancy = {
   occupied: boolean[][][];
@@ -1242,6 +1361,17 @@ function addTopologyShearWeb(
     shade: options.shade
   });
 }
+
+function polylineLength(points: Vec3[]): number {
+  let length = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1];
+    const current = points[index];
+    length += Math.hypot(current[0] - previous[0], current[1] - previous[1], current[2] - previous[2]);
+  }
+  return length;
+}
+
 
 function topologySampleField(field: TopologyField, xMm: number, yMm: number, widthMm: number, heightMm: number) {
   const [x, y] = topologyMmToGrid([xMm, yMm], field.nx, field.ny, widthMm, heightMm);
