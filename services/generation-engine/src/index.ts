@@ -30,7 +30,15 @@ type StructuralMaterial = {
   elasticModulusMpa: number;
 };
 
+type StructuralTopologyMode =
+  | "direct-load-path"
+  | "split-y-truss"
+  | "arched-bridge"
+  | "cantilever-side-load"
+  | "vibration-stabilized";
+
 type StructuralDesignParameters = {
+  topologyMode: StructuralTopologyMode;
   thicknessFactor: number;
   ribCount: number;
   gussetCount: number;
@@ -125,7 +133,7 @@ function generateStructuralPart(
   };
 
   return {
-    revision: "REQ-GEN-004-RENDERABLE-CANDIDATE-MESH",
+    revision: "REQ-GEN-005-CONSTRAINT-DRIVEN-TOPOLOGY",
     exportState: "idle",
     estimatedMassKg: selected.estimatedMassKg,
     estimatedBurn: estimateComputeBurn(filteredCandidates.length, accepted.length),
@@ -151,7 +159,7 @@ function generateStructuralPart(
         bestCandidateId: selected.id
       },
       notes: [
-        `${filteredCandidates.length} candidate designs were generated and scored.`,
+        `${filteredCandidates.length} constraint-driven topology candidates were generated and scored.`,
         `${rejected.length} candidates were rejected before simulation by manufacturability, load-path, envelope, and safety filters.`,
         `${accepted.length} candidates advanced to simulation-ready review.`,
         `Selected candidate ${selected.id} with total score ${selected.totalScore.toFixed(1)}/100.`,
@@ -160,7 +168,7 @@ function generateStructuralPart(
         } from the input requirements.`,
         `Selected geometry is ${
           selected.skeletonized ? "skeletonized" : "solid/sealed"
-        } with ${(selected.openAreaPercent ?? 0).toFixed(1)}% open area.`,
+        } with ${(selected.openAreaPercent ?? 0).toFixed(1)}% open area and topology mode ${String(selected.derivedParameters.topologyMode ?? "auto")}.`,
         `Estimated mass is ${selected.estimatedMassKg.toFixed(
           3
         )} kg with estimated safety factor ${selected.safetyFactorEstimate.toFixed(2)}.`,
@@ -458,6 +466,7 @@ function buildStructuralCandidates(
         latticeCellCount,
         loadPathContinuityScore: roundTo(loadPathContinuityScore, 0.1),
         derivedParameters: {
+          topologyMode: params.topologyMode,
           ribCount: params.ribCount,
           gussetCount: params.gussetCount,
           diagonalWebCount: params.diagonalWebCount,
@@ -645,9 +654,9 @@ function buildTopologyField(args: {
   const { width, height, wall, boltPositions, boltDiameterMm, candidate, requirements } = args;
 
   const targetOpenAreaPercent = clamp(
-    requirements.objectives.targetOpenAreaPercent ?? candidate.openAreaPercent ?? 34,
-    18,
-    62
+    requirements.objectives.targetOpenAreaPercent ?? candidate.openAreaPercent ?? 48,
+    35,
+    80
   );
 
   const columns = clamp(Math.round(width / 2.4), 34, 76);
@@ -1004,13 +1013,13 @@ function reinforceConnectivity(args: {
 
   for (const bolt of boltPositions) {
     for (const loadPoint of loadPoints) {
-      drawGridLine(bolt, loadPoint, 1);
+      drawGridLine(bolt, loadPoint, 0);
     }
   }
 
   if (boltPositions.length > 1) {
     for (let index = 0; index < boltPositions.length - 1; index += 1) {
-      drawGridLine(boltPositions[index], boltPositions[index + 1], 1);
+      drawGridLine(boltPositions[index], boltPositions[index + 1], 0);
     }
   }
 }
@@ -1030,209 +1039,307 @@ function addTopologySkeletonMembers(
 ) {
   const { width, height, depth, wall, field, candidate, requirements } = args;
   const boltPositions = field.boltPositions;
-  const loadPoints = field.loadPoints;
+  const topologyMode = String(candidate.derivedParameters.topologyMode ?? "direct-load-path") as StructuralTopologyMode;
 
-  const loadScale = clamp(requirements.loadCase.forceN / 2500, 0.72, 1.45);
-  const vibrationScale = clamp((requirements.loadCase.vibrationHz ?? 0) / 150, 0, 1.2);
-  const openAreaTarget = clamp(
-    requirements.objectives.targetOpenAreaPercent ?? candidate.openAreaPercent ?? 34,
-    18,
-    62
-  );
+  if (boltPositions.length === 2) {
+    addTwoBoltOptimizedSkeleton(mesh, {
+      width,
+      height,
+      depth,
+      wall,
+      field,
+      candidate,
+      requirements,
+      topologyMode
+    });
+    return;
+  }
 
-  const primaryThickness = Math.max(wall * 1.45, Math.min(width, height) * 0.066) * loadScale;
-  const secondaryThickness = Math.max(wall * 0.92, Math.min(width, height) * 0.038) * (0.92 + vibrationScale * 0.18);
-  const tertiaryThickness = Math.max(wall * 0.62, Math.min(width, height) * 0.025);
-  const memberDepth = depth * 0.9;
+  addGeneralBoltOptimizedSkeleton(mesh, {
+    width,
+    height,
+    depth,
+    wall,
+    field,
+    candidate,
+    requirements,
+    topologyMode
+  });
+}
+
+function addTwoBoltOptimizedSkeleton(
+  mesh: MeshBuilder,
+  args: {
+    width: number;
+    height: number;
+    depth: number;
+    wall: number;
+    field: TopologyField;
+    candidate: CandidateGeometry;
+    requirements: StructuralBracketRequirements;
+    topologyMode: StructuralTopologyMode;
+  }
+) {
+  const { width, height, depth, wall, field, candidate, requirements, topologyMode } = args;
+  const [leftBolt, rightBolt] = field.boltPositions[0][0] <= field.boltPositions[1][0]
+    ? field.boltPositions
+    : [field.boltPositions[1], field.boltPositions[0]];
+
+  const loadCenter = averagePoints(field.loadPoints);
+  const boltCenter = averagePoints([leftBolt, rightBolt]);
+  const loadScale = clamp(requirements.loadCase.forceN / 2500, 0.78, 1.55);
+  const vibrationScale = clamp((requirements.loadCase.vibrationHz ?? 0) / 160, 0, 1.25);
+  const targetOpenArea = clamp(requirements.objectives.targetOpenAreaPercent ?? candidate.openAreaPercent ?? 52, 35, 80);
+  const memberDepth = depth * 0.88;
   const frontZ = -memberDepth / 2;
 
-  const loadCenter = averagePoints(loadPoints);
-  const boltCenter = averagePoints(boltPositions);
-  const neutralNode: [number, number] = [
-    clamp((loadCenter[0] + boltCenter[0]) / 2, -width * 0.22, width * 0.22),
-    clamp((loadCenter[1] + boltCenter[1]) / 2, -height * 0.18, height * 0.26)
-  ];
+  const mainThickness = Math.max(wall * 1.2, Math.min(width, height) * 0.052) * loadScale;
+  const tieThickness = Math.max(wall * 0.78, Math.min(width, height) * 0.026) * (1 + vibrationScale * 0.15);
+  const nodeRadius = Math.max(mainThickness * 1.05, wall * 1.55);
+  const boltPadOffset = Math.max(field.boltPadRadius * 0.72, wall * 2.2);
 
-  const upperNode: [number, number] = [
-    clamp(loadCenter[0], -width * 0.18, width * 0.18),
-    clamp(height * 0.21, -height * 0.1, height * 0.32)
-  ];
+  const apexY = requirements.loadCase.direction === "lateral"
+    ? clamp(loadCenter[1], -height * 0.18, height * 0.3)
+    : clamp(height * 0.22, height * 0.06, height * 0.33);
+  const apexX = requirements.loadCase.direction === "lateral"
+    ? clamp(width * 0.23, -width * 0.1, width * 0.34)
+    : clamp(loadCenter[0], -width * 0.12, width * 0.12);
+  const apex: [number, number] = [apexX, apexY];
 
-  const lowerNode: [number, number] = [
-    clamp(boltCenter[0], -width * 0.2, width * 0.2),
-    clamp(-height * 0.24, -height * 0.36, height * 0.02)
-  ];
-
-  addSolidNodePad(mesh, {
-    id: "topology-neutral-node",
-    group: "rib",
-    center: [neutralNode[0], neutralNode[1], 0],
-    radius: primaryThickness * 1.06,
-    depth: memberDepth,
-    segments: 24,
-    shade: 0.72
-  });
+  const lowerNodeY = clamp(boltCenter[1] + height * 0.08, -height * 0.32, height * 0.02);
+  const lowerNode: [number, number] = [boltCenter[0], lowerNodeY];
 
   addSolidNodePad(mesh, {
-    id: "topology-upper-load-node",
+    id: "optimized-apex-load-node",
     group: "load-plate",
-    center: [upperNode[0], upperNode[1], 0],
-    radius: primaryThickness * 0.92,
+    center: [apex[0], apex[1], 0],
+    radius: nodeRadius,
     depth: memberDepth,
-    segments: 24,
+    segments: 28,
     shade: 0.78
   });
 
-  if (boltPositions.length >= 2) {
-    addSolidNodePad(mesh, {
-      id: "topology-lower-bolt-bridge-node",
-      group: "mounting-plate",
-      center: [lowerNode[0], lowerNode[1], 0],
-      radius: secondaryThickness * 0.95,
-      depth: memberDepth,
-      segments: 24,
-      shade: 0.68
-    });
-  }
-
-  boltPositions.forEach((bolt, index) => {
-    const startToNeutral = offsetPointAlongSegment(bolt, neutralNode, field.boltPadRadius * 0.72);
-    const startToLower = offsetPointAlongSegment(bolt, lowerNode, field.boltPadRadius * 0.6);
-
-    addOrientedWebFeature(mesh, {
-      id: `primary-bolt-to-core-${index + 1}`,
-      group: "diagonal-web",
-      start: [startToNeutral[0], startToNeutral[1], frontZ],
-      end: [neutralNode[0], neutralNode[1], frontZ],
-      thickness: primaryThickness,
-      depth: memberDepth,
-      shade: 0.72
-    });
-
-    if (boltPositions.length > 1) {
-      addOrientedWebFeature(mesh, {
-        id: `lower-bolt-spreader-${index + 1}`,
-        group: "gusset",
-        start: [startToLower[0], startToLower[1], frontZ],
-        end: [lowerNode[0], lowerNode[1], frontZ],
-        thickness: secondaryThickness,
-        depth: memberDepth * 0.96,
-        shade: 0.64
-      });
-    }
+  addSolidNodePad(mesh, {
+    id: "optimized-bolt-bridge-node",
+    group: "mounting-plate",
+    center: [lowerNode[0], lowerNode[1], 0],
+    radius: Math.max(tieThickness * 1.25, wall * 1.1),
+    depth: memberDepth * 0.84,
+    segments: 24,
+    shade: 0.64
   });
 
+  const leftStart = offsetPointAlongSegment(leftBolt, apex, boltPadOffset);
+  const rightStart = offsetPointAlongSegment(rightBolt, apex, boltPadOffset);
+  const leftLower = offsetPointAlongSegment(leftBolt, lowerNode, boltPadOffset * 0.72);
+  const rightLower = offsetPointAlongSegment(rightBolt, lowerNode, boltPadOffset * 0.72);
+
   addOrientedWebFeature(mesh, {
-    id: "primary-core-to-upper-load-node",
+    id: "primary-load-member-left-bolt-to-apex",
     group: "diagonal-web",
-    start: [neutralNode[0], neutralNode[1], frontZ],
-    end: [upperNode[0], upperNode[1], frontZ],
-    thickness: primaryThickness * 0.92,
+    start: [leftStart[0], leftStart[1], frontZ],
+    end: [apex[0], apex[1], frontZ],
+    thickness: mainThickness,
     depth: memberDepth,
     shade: 0.74
   });
 
-  loadPoints.forEach((loadPoint, index) => {
-    const end = offsetPointAlongSegment(loadPoint, upperNode, Math.max(wall * 1.6, primaryThickness * 0.7));
+  addOrientedWebFeature(mesh, {
+    id: "primary-load-member-right-bolt-to-apex",
+    group: "diagonal-web",
+    start: [rightStart[0], rightStart[1], frontZ],
+    end: [apex[0], apex[1], frontZ],
+    thickness: mainThickness,
+    depth: memberDepth,
+    shade: 0.74
+  });
+
+  addOrientedWebFeature(mesh, {
+    id: "bolt-to-bolt-tension-tie",
+    group: "rib",
+    start: [leftLower[0], leftLower[1], frontZ],
+    end: [rightLower[0], rightLower[1], frontZ],
+    thickness: tieThickness,
+    depth: memberDepth * 0.78,
+    shade: 0.58
+  });
+
+  for (let index = 0; index < field.loadPoints.length; index += 1) {
+    const loadPoint = field.loadPoints[index];
+    const end = offsetPointAlongSegment(loadPoint, apex, Math.max(wall * 1.6, mainThickness * 0.62));
 
     addOrientedWebFeature(mesh, {
-      id: `upper-node-to-load-interface-${index + 1}`,
+      id: `apex-to-load-interface-${index + 1}`,
       group: "gusset",
-      start: [upperNode[0], upperNode[1], frontZ],
+      start: [apex[0], apex[1], frontZ],
       end: [end[0], end[1], frontZ],
-      thickness: secondaryThickness * 1.05,
-      depth: memberDepth * 0.96,
-      shade: 0.69
+      thickness: Math.max(tieThickness * 1.05, wall * 0.9),
+      depth: memberDepth * 0.82,
+      shade: 0.68
+    });
+  }
+
+  if (topologyMode === "split-y-truss" || topologyMode === "vibration-stabilized" || vibrationScale > 0.55) {
+    const braceNode: [number, number] = [
+      clamp((apex[0] + lowerNode[0]) / 2, -width * 0.16, width * 0.16),
+      clamp((apex[1] + lowerNode[1]) / 2, -height * 0.1, height * 0.16)
+    ];
+
+    addSolidNodePad(mesh, {
+      id: "secondary-shear-node",
+      group: "rib",
+      center: [braceNode[0], braceNode[1], 0],
+      radius: Math.max(tieThickness * 1.1, wall),
+      depth: memberDepth * 0.72,
+      segments: 20,
+      shade: 0.6
+    });
+
+    addOrientedWebFeature(mesh, {
+      id: "left-shear-brace",
+      group: "gusset",
+      start: [leftStart[0], leftStart[1], frontZ],
+      end: [braceNode[0], braceNode[1], frontZ],
+      thickness: tieThickness * 0.82,
+      depth: memberDepth * 0.66,
+      shade: 0.52
+    });
+
+    addOrientedWebFeature(mesh, {
+      id: "right-shear-brace",
+      group: "gusset",
+      start: [rightStart[0], rightStart[1], frontZ],
+      end: [braceNode[0], braceNode[1], frontZ],
+      thickness: tieThickness * 0.82,
+      depth: memberDepth * 0.66,
+      shade: 0.52
+    });
+  }
+
+  if (topologyMode === "arched-bridge") {
+    const crown: [number, number] = [apex[0], clamp(apex[1] - height * 0.08, -height * 0.02, height * 0.2)];
+    addOrientedWebFeature(mesh, {
+      id: "arched-compression-bridge-left",
+      group: "diagonal-web",
+      start: [leftStart[0], leftStart[1], frontZ],
+      end: [crown[0], crown[1], frontZ],
+      thickness: Math.max(tieThickness * 0.95, wall * 0.8),
+      depth: memberDepth * 0.72,
+      shade: 0.55
+    });
+    addOrientedWebFeature(mesh, {
+      id: "arched-compression-bridge-right",
+      group: "diagonal-web",
+      start: [rightStart[0], rightStart[1], frontZ],
+      end: [crown[0], crown[1], frontZ],
+      thickness: Math.max(tieThickness * 0.95, wall * 0.8),
+      depth: memberDepth * 0.72,
+      shade: 0.55
+    });
+  }
+
+  candidate.derivedParameters.optimizationSummary = {
+    selectedArchitecture: topologyMode,
+    boltConstraint: "two-bolt load path",
+    primaryMembers: 2,
+    auxiliaryMembers:
+      topologyMode === "direct-load-path"
+        ? 1
+        : topologyMode === "arched-bridge"
+          ? 3
+          : 4,
+    targetOpenAreaPercent: roundTo(targetOpenArea, 0.1),
+    sizingBasis: "required load, vibration, wall minimum, bolt pad radius"
+  };
+}
+
+function addGeneralBoltOptimizedSkeleton(
+  mesh: MeshBuilder,
+  args: {
+    width: number;
+    height: number;
+    depth: number;
+    wall: number;
+    field: TopologyField;
+    candidate: CandidateGeometry;
+    requirements: StructuralBracketRequirements;
+    topologyMode: StructuralTopologyMode;
+  }
+) {
+  const { width, height, depth, wall, field, candidate, requirements, topologyMode } = args;
+  const boltPositions = field.boltPositions;
+  const loadPoints = field.loadPoints;
+  const loadCenter = averagePoints(loadPoints);
+  const boltCenter = averagePoints(boltPositions);
+
+  const loadScale = clamp(requirements.loadCase.forceN / 2500, 0.78, 1.5);
+  const vibrationScale = clamp((requirements.loadCase.vibrationHz ?? 0) / 160, 0, 1.15);
+  const memberDepth = depth * 0.88;
+  const frontZ = -memberDepth / 2;
+  const mainThickness = Math.max(wall * 1.18, Math.min(width, height) * 0.048) * loadScale;
+  const secondaryThickness = Math.max(wall * 0.76, Math.min(width, height) * 0.028) * (1 + vibrationScale * 0.15);
+
+  const hub: [number, number] = [
+    clamp((loadCenter[0] + boltCenter[0]) / 2, -width * 0.2, width * 0.2),
+    clamp((loadCenter[1] + boltCenter[1]) / 2, -height * 0.12, height * 0.24)
+  ];
+
+  addSolidNodePad(mesh, {
+    id: "optimized-central-load-hub",
+    group: "rib",
+    center: [hub[0], hub[1], 0],
+    radius: mainThickness,
+    depth: memberDepth,
+    segments: 26,
+    shade: 0.72
+  });
+
+  boltPositions.forEach((bolt, index) => {
+    const start = offsetPointAlongSegment(bolt, hub, field.boltPadRadius * 0.7);
+    addOrientedWebFeature(mesh, {
+      id: `bolt-${index + 1}-to-load-hub`,
+      group: "diagonal-web",
+      start: [start[0], start[1], frontZ],
+      end: [hub[0], hub[1], frontZ],
+      thickness: mainThickness * (boltPositions.length > 4 ? 0.78 : 0.92),
+      depth: memberDepth,
+      shade: 0.7
     });
   });
 
-  if (boltPositions.length >= 2) {
-    for (let index = 0; index < boltPositions.length - 1; index += 1) {
-      const a = offsetPointAlongSegment(boltPositions[index], boltPositions[index + 1], field.boltPadRadius * 0.66);
-      const b = offsetPointAlongSegment(boltPositions[index + 1], boltPositions[index], field.boltPadRadius * 0.66);
-
-      addOrientedWebFeature(mesh, {
-        id: `bolt-to-bolt-tension-tie-${index + 1}`,
-        group: "rib",
-        start: [a[0], a[1], frontZ],
-        end: [b[0], b[1], frontZ],
-        thickness: secondaryThickness * 0.92,
-        depth: memberDepth * 0.9,
-        shade: 0.58
-      });
-    }
-  }
-
-  const branchCount = clamp(Math.round(numberParam(candidate, "diagonalWebCount", 6) / 2), 2, 5);
-  for (let index = 0; index < branchCount; index += 1) {
-    const t = branchCount === 1 ? 0.5 : index / (branchCount - 1);
-    const side = index % 2 === 0 ? -1 : 1;
-    const y = lerp(-height * 0.12, height * 0.18, t);
-    const x = side * lerp(width * 0.18, width * 0.34, t);
-    const anchor: [number, number] = [x, y];
-
-    const source: [number, number] = index % 2 === 0 ? neutralNode : upperNode;
+  loadPoints.forEach((loadPoint, index) => {
+    const end = offsetPointAlongSegment(loadPoint, hub, Math.max(wall * 1.6, mainThickness * 0.7));
     addOrientedWebFeature(mesh, {
-      id: `secondary-branch-load-web-${index + 1}`,
-      group: "diagonal-web",
-      start: [source[0], source[1], frontZ],
-      end: [anchor[0], anchor[1], frontZ],
-      thickness: tertiaryThickness * (1.05 + vibrationScale * 0.12),
-      depth: memberDepth * 0.82,
-      shade: 0.56
-    });
-  }
-
-  if (vibrationScale > 0.2) {
-    const braceY = clamp(neutralNode[1] - height * 0.08, -height * 0.28, height * 0.16);
-    addOrientedWebFeature(mesh, {
-      id: "vibration-cross-tie-left",
-      group: "rib",
-      start: [-width * 0.34, braceY, frontZ],
-      end: [width * 0.34, braceY + height * 0.07, frontZ],
-      thickness: tertiaryThickness * 0.95,
-      depth: memberDepth * 0.74,
-      shade: 0.52
-    });
-    addOrientedWebFeature(mesh, {
-      id: "vibration-cross-tie-right",
-      group: "rib",
-      start: [-width * 0.34, braceY + height * 0.07, frontZ],
-      end: [width * 0.34, braceY, frontZ],
-      thickness: tertiaryThickness * 0.95,
-      depth: memberDepth * 0.74,
-      shade: 0.52
-    });
-  }
-
-  const edgeRelief = clamp(openAreaTarget / 100, 0.18, 0.62);
-  const sideNodeRadius = Math.max(wall * 1.35, primaryThickness * 0.58);
-  const sideY = clamp(neutralNode[1], -height * 0.14, height * 0.22);
-
-  for (const side of [-1, 1]) {
-    const sideNode: [number, number] = [side * width * (0.39 - edgeRelief * 0.08), sideY];
-    addSolidNodePad(mesh, {
-      id: `side-stability-node-${side < 0 ? "left" : "right"}`,
-      group: "rib",
-      center: [sideNode[0], sideNode[1], 0],
-      radius: sideNodeRadius,
-      depth: memberDepth * 0.82,
-      segments: 20,
-      shade: 0.56
-    });
-
-    addOrientedWebFeature(mesh, {
-      id: `side-node-to-core-${side < 0 ? "left" : "right"}`,
+      id: `hub-to-load-${index + 1}`,
       group: "gusset",
-      start: [sideNode[0], sideNode[1], frontZ],
-      end: [neutralNode[0], neutralNode[1], frontZ],
-      thickness: tertiaryThickness,
-      depth: memberDepth * 0.78,
-      shade: 0.54
+      start: [hub[0], hub[1], frontZ],
+      end: [end[0], end[1], frontZ],
+      thickness: secondaryThickness * 1.08,
+      depth: memberDepth * 0.82,
+      shade: 0.66
+    });
+  });
+
+  if (topologyMode === "vibration-stabilized" || vibrationScale > 0.45) {
+    addOrientedWebFeature(mesh, {
+      id: "single-vibration-tie",
+      group: "rib",
+      start: [-width * 0.28, hub[1] - height * 0.07, frontZ],
+      end: [width * 0.28, hub[1] + height * 0.06, frontZ],
+      thickness: secondaryThickness * 0.78,
+      depth: memberDepth * 0.62,
+      shade: 0.52
     });
   }
-}
 
+  candidate.derivedParameters.optimizationSummary = {
+    selectedArchitecture: topologyMode,
+    boltConstraint: `${boltPositions.length}-bolt load path`,
+    primaryMembers: boltPositions.length,
+    auxiliaryMembers: loadPoints.length + (topologyMode === "vibration-stabilized" ? 1 : 0),
+    sizingBasis: "required load, vibration, wall minimum, bolt pad radius"
+  };
+}
 function addSolidNodePad(
   mesh: MeshBuilder,
   options: {
@@ -2003,65 +2110,80 @@ function buildStructuralDesignSpace(
   const policy = resolveSkeletonizationPolicy(family, requirements);
   const sealedRequired = policy === "sealed-required" || policy === "none";
 
-  const targetOpenArea =
-    requirements.objectives.targetOpenAreaPercent ??
-    (requirements.objectives.priority === "lightweight" ? 42 : 32);
+  const requestedOpenArea = requirements.objectives.targetOpenAreaPercent;
+  const targetOpenArea = clamp(
+    requestedOpenArea ?? (requirements.objectives.priority === "lightweight" ? 58 : 46),
+    35,
+    80
+  );
 
-  const thicknessFactors = [0.85, 1, 1.15, 1.3, 1.55, 1.85, 2.15];
-  const ribCounts = [2, 3, 4, 5, 6, 7];
-  const gussetCounts = [2, 4, 6, 8];
-  const diagonalWebCounts = sealedRequired ? [0] : [2, 4, 6, 8, 10];
-  const lighteningHoleCounts = sealedRequired
-    ? [0]
-    : targetOpenArea >= 40
-      ? [4, 6, 8, 10, 12]
-      : [2, 4, 6, 8];
+  const loadMode = requirements.loadCase.direction;
+  const vibrationHz = requirements.loadCase.vibrationHz ?? 0;
 
-  const holeDiameterOptions = sealedRequired
+  const topologyModes: StructuralTopologyMode[] = sealedRequired
+    ? ["direct-load-path"]
+    : loadMode === "lateral"
+      ? ["cantilever-side-load", "split-y-truss", "vibration-stabilized"]
+      : vibrationHz > 80
+        ? ["direct-load-path", "split-y-truss", "arched-bridge", "vibration-stabilized"]
+        : ["direct-load-path", "split-y-truss", "arched-bridge"];
+
+  const thicknessFactors = requirements.objectives.priority === "lightweight"
+    ? [0.9, 1.05, 1.22]
+    : requirements.objectives.priority === "stiffness"
+      ? [1.05, 1.25, 1.45]
+      : [0.95, 1.15, 1.35];
+
+  const openAreaBuckets = sealedRequired
     ? [0]
-    : [
-        requirements.manufacturing.minWallThicknessMm * 2.5,
-        requirements.manufacturing.minWallThicknessMm * 3.25,
-        requirements.manufacturing.minWallThicknessMm * 4,
-        requirements.manufacturing.minWallThicknessMm * 5
-      ];
+    : Array.from(new Set([
+        roundTo(targetOpenArea - 10, 1),
+        roundTo(targetOpenArea, 1),
+        roundTo(targetOpenArea + 10, 1)
+      ])).map((value) => clamp(value, 35, 80));
 
   const designSpace: StructuralDesignParameters[] = [];
 
-  for (const thicknessFactor of thicknessFactors) {
-    for (const ribCount of ribCounts) {
-      for (const gussetCount of gussetCounts) {
-        for (const diagonalWebCount of diagonalWebCounts) {
-          for (const lighteningHoleCount of lighteningHoleCounts) {
-            for (const lighteningHoleDiameterMm of holeDiameterOptions) {
-              const skeletonLevel =
-                sealedRequired || lighteningHoleCount === 0
-                  ? "none"
-                  : targetOpenArea >= 44 || lighteningHoleCount >= 10
-                    ? "aggressive"
-                    : targetOpenArea >= 30 || lighteningHoleCount >= 6
-                      ? "moderate"
-                      : "light";
+  for (const topologyMode of topologyModes) {
+    for (const thicknessFactor of thicknessFactors) {
+      for (const openArea of openAreaBuckets) {
+        const skeletonLevel = sealedRequired
+          ? "none"
+          : openArea >= 64
+            ? "aggressive"
+            : openArea >= 48
+              ? "moderate"
+              : "light";
 
-              designSpace.push({
-                thicknessFactor,
-                ribCount,
-                gussetCount,
-                diagonalWebCount,
-                lighteningHoleCount,
-                lighteningHoleDiameterMm: roundTo(lighteningHoleDiameterMm, 0.1),
-                skeletonLevel
-              });
-            }
-          }
-        }
+        const modeMultiplier =
+          topologyMode === "direct-load-path"
+            ? 0.8
+            : topologyMode === "split-y-truss"
+              ? 1
+              : topologyMode === "arched-bridge"
+                ? 1.08
+                : topologyMode === "cantilever-side-load"
+                  ? 0.95
+                  : 1.18;
+
+        designSpace.push({
+          topologyMode,
+          thicknessFactor,
+          ribCount: topologyMode === "direct-load-path" ? 2 : topologyMode === "arched-bridge" ? 3 : 2,
+          gussetCount: topologyMode === "vibration-stabilized" ? 4 : topologyMode === "split-y-truss" ? 3 : 2,
+          diagonalWebCount: sealedRequired ? 0 : Math.max(1, Math.round((100 - openArea) / 16 * modeMultiplier)),
+          lighteningHoleCount: sealedRequired ? 0 : Math.max(1, Math.round(openArea / 14)),
+          lighteningHoleDiameterMm: sealedRequired
+            ? 0
+            : roundTo(requirements.manufacturing.minWallThicknessMm * clamp(openArea / 15, 2.4, 5.2), 0.1),
+          skeletonLevel
+        });
       }
     }
   }
 
   return designSpace;
 }
-
 function resolveSkeletonizationPolicy(
   family: ComponentFamily,
   requirements: StructuralBracketRequirements
