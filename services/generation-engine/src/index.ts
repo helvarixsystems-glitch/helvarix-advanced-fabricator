@@ -523,51 +523,69 @@ function buildStructuralRenderMesh(
   const railHeight = Math.max(wall * 2.6, height * 0.13);
   const sideRailWidth = Math.max(wall * 2.2, width * 0.08);
   const ribWidth = Math.max(wall * 1.25, width * 0.04);
+  const frontSkinZ = depth / 2;
 
-  addBoxFeature(mesh, {
-    id: "mounting-plate-bottom",
-    group: "mounting-plate",
-    min: [-width / 2, -height / 2, -depth / 2],
-    max: [width / 2, -height / 2 + railHeight, depth / 2],
-    shade: 0.72
-  });
+  const boltPositions = buildBoltPositions(width, height, railHeight, boltCount);
+  const lighteningPositions = candidate.skeletonized
+    ? buildLighteningHolePositions(width, height, railHeight, lighteningHoleCount)
+    : [];
 
-  addBoxFeature(mesh, {
-    id: "load-plate-top",
-    group: "load-plate",
-    min: [-width / 2, height / 2 - railHeight, -depth / 2],
-    max: [width / 2, height / 2, depth / 2],
-    shade: 0.82
-  });
+  const holes: PlanarHole[] = [
+    ...boltPositions.map((center, index) => ({
+      id: `bolt-hole-${index + 1}`,
+      type: "bolt-hole" as const,
+      x: center[0],
+      y: center[1],
+      radius: Math.max(boltDiameterMm * 0.56, wall * 0.75)
+    })),
+    ...lighteningPositions.map((center, index) => ({
+      id: `lightening-hole-${index + 1}`,
+      type: "lightening-hole" as const,
+      x: center[0],
+      y: center[1],
+      radius: Math.max(lighteningHoleDiameterMm / 2, wall * 1.1)
+    }))
+  ];
 
-  addBoxFeature(mesh, {
-    id: "side-rail-left",
-    group: "rib",
-    min: [-width / 2, -height / 2, -depth / 2],
-    max: [-width / 2 + sideRailWidth, height / 2, depth / 2],
-    shade: 0.68
-  });
-
-  addBoxFeature(mesh, {
-    id: "side-rail-right",
-    group: "rib",
-    min: [width / 2 - sideRailWidth, -height / 2, -depth / 2],
-    max: [width / 2, height / 2, depth / 2],
+  addPerforatedPlateFeature(mesh, {
+    id: "primary-cut-plate",
+    width,
+    height,
+    depth,
+    holes,
+    cellsX: Math.max(28, Math.min(54, Math.round(width / Math.max(wall * 0.62, 2.2)))),
+    cellsY: Math.max(20, Math.min(42, Math.round(height / Math.max(wall * 0.62, 2.2)))),
     shade: 0.7
+  });
+
+  addBoxFeature(mesh, {
+    id: "left-integral-side-rail",
+    group: "rib",
+    min: [-width / 2, -height / 2, frontSkinZ],
+    max: [-width / 2 + sideRailWidth, height / 2, frontSkinZ + wall * 0.72],
+    shade: 0.58
+  });
+
+  addBoxFeature(mesh, {
+    id: "right-integral-side-rail",
+    group: "rib",
+    min: [width / 2 - sideRailWidth, -height / 2, frontSkinZ],
+    max: [width / 2, height / 2, frontSkinZ + wall * 0.72],
+    shade: 0.6
   });
 
   const usableHeight = height - railHeight * 2.35;
   const ribSlots = Math.max(1, Math.min(9, ribCount));
 
   for (let index = 0; index < ribSlots; index += 1) {
-    const x = lerp(-width * 0.34, width * 0.34, ribSlots === 1 ? 0.5 : index / (ribSlots - 1));
+    const x = lerp(-width * 0.33, width * 0.33, ribSlots === 1 ? 0.5 : index / (ribSlots - 1));
 
     addBoxFeature(mesh, {
-      id: `vertical-rib-${index + 1}`,
+      id: `front-load-rib-${index + 1}`,
       group: "rib",
-      min: [x - ribWidth / 2, -usableHeight / 2, -depth * 0.42],
-      max: [x + ribWidth / 2, usableHeight / 2, depth * 0.42],
-      shade: 0.64 + index * 0.012
+      min: [x - ribWidth / 2, -usableHeight / 2, frontSkinZ + wall * 0.08],
+      max: [x + ribWidth / 2, usableHeight / 2, frontSkinZ + wall * 1.35],
+      shade: 0.66 + index * 0.012
     });
   }
 
@@ -581,13 +599,14 @@ function buildStructuralRenderMesh(
       gussetSlots <= 2 ? 0.5 : Math.floor(index / 2) / Math.max(Math.ceil(gussetSlots / 2) - 1, 1)
     );
 
-    addDiagonalBoxFeature(mesh, {
-      id: `gusset-${index + 1}`,
+    addOrientedWebFeature(mesh, {
+      id: `triangulated-gusset-${index + 1}`,
       group: "gusset",
-      start: [side * width * 0.38, y - wall * 0.5, -depth * 0.38],
-      end: [side * width * 0.18, y + height * 0.14, depth * 0.36],
-      thickness: Math.max(wall * 1.1, 4),
-      shade: 0.62
+      start: [side * width * 0.39, y - wall * 0.6, frontSkinZ + wall * 0.2],
+      end: [side * width * 0.18, y + height * 0.13, frontSkinZ + wall * 1.1],
+      thickness: Math.max(wall * 1.05, 4),
+      depth: Math.max(wall * 0.7, 3.2),
+      shade: 0.63
     });
   }
 
@@ -596,70 +615,49 @@ function buildStructuralRenderMesh(
 
     for (let index = 0; index < webSlots; index += 1) {
       const y = lerp(
-        -height * 0.28,
-        height * 0.28,
+        -height * 0.27,
+        height * 0.27,
         webSlots === 1 ? 0.5 : index / Math.max(webSlots - 1, 1)
       );
 
       const tilt = index % 2 === 0 ? 1 : -1;
 
-      addDiagonalBoxFeature(mesh, {
-        id: `diagonal-web-${index + 1}`,
+      addOrientedWebFeature(mesh, {
+        id: `diagonal-load-web-${index + 1}`,
         group: "diagonal-web",
-        start: [-width * 0.33, y - wall * 0.3, -depth * 0.24],
-        end: [width * 0.33, y + tilt * height * 0.12, depth * 0.22],
-        thickness: Math.max(wall * 0.78, 3.5),
-        shade: 0.56
+        start: [-width * 0.34, y - wall * 0.25, frontSkinZ + wall * 0.15],
+        end: [width * 0.34, y + tilt * height * 0.12, frontSkinZ + wall * 0.98],
+        thickness: Math.max(wall * 0.7, 3.2),
+        depth: Math.max(wall * 0.52, 2.8),
+        shade: 0.55
       });
     }
   } else {
     addBoxFeature(mesh, {
       id: "solid-center-web",
       group: "rib",
-      min: [-width * 0.28, -height * 0.22, -depth * 0.28],
-      max: [width * 0.28, height * 0.22, depth * 0.28],
+      min: [-width * 0.28, -height * 0.22, frontSkinZ + wall * 0.1],
+      max: [width * 0.28, height * 0.22, frontSkinZ + wall * 1.05],
       shade: 0.56
     });
   }
 
-  const boltPositions = buildBoltPositions(width, height, railHeight, boltCount);
+  holes.forEach((hole) => {
+    const rimOuterRadius = hole.type === "bolt-hole" ? hole.radius * 1.42 : hole.radius * 1.18;
+    const rimInnerRadius = hole.radius * 1.03;
 
-  boltPositions.forEach((center, index) => {
     addCylinderFeature(mesh, {
-      id: `bolt-hole-${index + 1}`,
-      type: "bolt-hole",
-      center: [center[0], center[1], depth / 2 + wall * 0.08],
-      radius: boltDiameterMm * 0.85,
-      innerRadius: boltDiameterMm * 0.42,
-      height: wall * 1.15,
-      segments: 24,
-      group: "bolt-hole",
-      shade: 0.88
+      id: `${hole.id}-raised-rim`,
+      type: hole.type,
+      center: [hole.x, hole.y, frontSkinZ + wall * 0.48],
+      radius: rimOuterRadius,
+      innerRadius: rimInnerRadius,
+      height: hole.type === "bolt-hole" ? wall * 0.72 : wall * 0.48,
+      segments: hole.type === "bolt-hole" ? 28 : 24,
+      group: hole.type,
+      shade: hole.type === "bolt-hole" ? 0.84 : 0.76
     });
   });
-
-  if (candidate.skeletonized) {
-    const lighteningPositions = buildLighteningHolePositions(
-      width,
-      height,
-      railHeight,
-      lighteningHoleCount
-    );
-
-    lighteningPositions.forEach((center, index) => {
-      addCylinderFeature(mesh, {
-        id: `lightening-hole-${index + 1}`,
-        type: "lightening-hole",
-        center: [center[0], center[1], depth / 2 + wall * 0.06],
-        radius: lighteningHoleDiameterMm / 2,
-        innerRadius: lighteningHoleDiameterMm * 0.31,
-        height: wall * 0.9,
-        segments: 24,
-        group: "lightening-hole",
-        shade: 0.77
-      });
-    });
-  }
 
   const renderMesh: RenderableMesh = {
     version: "haf-render-mesh-v1",
@@ -677,7 +675,7 @@ function buildStructuralRenderMesh(
       candidateId: candidate.id,
       source: "generation-engine",
       boltCount,
-      lighteningHoleCount: candidate.skeletonized ? lighteningHoleCount : 0,
+      lighteningHoleCount: candidate.skeletonized ? lighteningPositions.length : 0,
       ribCount,
       gussetCount,
       diagonalWebCount,
@@ -700,6 +698,161 @@ function createMeshBuilder(): MeshBuilder {
     faces: [],
     features: []
   };
+}
+
+type PlanarHole = {
+  id: string;
+  type: "bolt-hole" | "lightening-hole";
+  x: number;
+  y: number;
+  radius: number;
+};
+
+function addPerforatedPlateFeature(
+  mesh: MeshBuilder,
+  options: {
+    id: string;
+    width: number;
+    height: number;
+    depth: number;
+    holes: PlanarHole[];
+    cellsX: number;
+    cellsY: number;
+    shade: number;
+  }
+) {
+  const cellsX = Math.max(8, Math.round(options.cellsX));
+  const cellsY = Math.max(8, Math.round(options.cellsY));
+  const xStep = options.width / cellsX;
+  const yStep = options.height / cellsY;
+  const z0 = -options.depth / 2;
+  const z1 = options.depth / 2;
+
+  const occupied: boolean[][] = [];
+
+  for (let ix = 0; ix < cellsX; ix += 1) {
+    occupied[ix] = [];
+
+    for (let iy = 0; iy < cellsY; iy += 1) {
+      const x = -options.width / 2 + xStep * (ix + 0.5);
+      const y = -options.height / 2 + yStep * (iy + 0.5);
+      occupied[ix][iy] = !options.holes.some((hole) => isPointInsideHole(x, y, hole));
+    }
+  }
+
+  for (let ix = 0; ix < cellsX; ix += 1) {
+    for (let iy = 0; iy < cellsY; iy += 1) {
+      if (!occupied[ix][iy]) continue;
+
+      const x0 = -options.width / 2 + xStep * ix;
+      const x1 = x0 + xStep;
+      const y0 = -options.height / 2 + yStep * iy;
+      const y1 = y0 + yStep;
+
+      addQuad(mesh, [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], "mounting-plate", options.shade * 1.04);
+      addQuad(mesh, [[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]], "mounting-plate", options.shade * 0.86);
+
+      if (ix === 0 || !occupied[ix - 1][iy]) {
+        addQuad(mesh, [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], "mounting-plate", options.shade * 0.72);
+      }
+
+      if (ix === cellsX - 1 || !occupied[ix + 1][iy]) {
+        addQuad(mesh, [[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]], "mounting-plate", options.shade * 0.78);
+      }
+
+      if (iy === 0 || !occupied[ix][iy - 1]) {
+        addQuad(mesh, [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], "mounting-plate", options.shade * 0.74);
+      }
+
+      if (iy === cellsY - 1 || !occupied[ix][iy + 1]) {
+        addQuad(mesh, [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], "mounting-plate", options.shade * 0.82);
+      }
+    }
+  }
+
+  mesh.features.push({
+    type: "mounting-plate",
+    id: options.id,
+    center: [0, 0, 0],
+    size: [options.width, options.height, options.depth]
+  });
+
+  options.holes.forEach((hole) => {
+    mesh.features.push({
+      type: hole.type,
+      id: hole.id,
+      center: [hole.x, hole.y, 0],
+      diameterMm: hole.radius * 2,
+      throughAxis: "z"
+    });
+  });
+}
+
+function isPointInsideHole(x: number, y: number, hole: PlanarHole) {
+  const dx = x - hole.x;
+  const dy = y - hole.y;
+  return Math.sqrt(dx * dx + dy * dy) <= hole.radius * 0.98;
+}
+
+function addQuad(mesh: MeshBuilder, vertices: Vec3[], group: string, shade: number) {
+  const start = mesh.vertices.length;
+  mesh.vertices.push(vertices[0], vertices[1], vertices[2], vertices[3]);
+  mesh.faces.push({
+    indices: [start, start + 1, start + 2, start + 3],
+    group,
+    shade
+  });
+}
+
+function addOrientedWebFeature(
+  mesh: MeshBuilder,
+  options: {
+    id: string;
+    group: "gusset" | "diagonal-web";
+    start: Vec3;
+    end: Vec3;
+    thickness: number;
+    depth: number;
+    shade: number;
+  }
+) {
+  const dx = options.end[0] - options.start[0];
+  const dy = options.end[1] - options.start[1];
+  const length = Math.max(Math.sqrt(dx * dx + dy * dy), 0.001);
+  const nx = -dy / length;
+  const ny = dx / length;
+  const halfThickness = options.thickness / 2;
+  const z0 = Math.min(options.start[2], options.end[2]);
+  const z1 = z0 + options.depth;
+
+  const a0: Vec3 = [options.start[0] + nx * halfThickness, options.start[1] + ny * halfThickness, z0];
+  const a1: Vec3 = [options.start[0] - nx * halfThickness, options.start[1] - ny * halfThickness, z0];
+  const b0: Vec3 = [options.end[0] + nx * halfThickness, options.end[1] + ny * halfThickness, z0];
+  const b1: Vec3 = [options.end[0] - nx * halfThickness, options.end[1] - ny * halfThickness, z0];
+
+  const a0f: Vec3 = [a0[0], a0[1], z1];
+  const a1f: Vec3 = [a1[0], a1[1], z1];
+  const b0f: Vec3 = [b0[0], b0[1], z1];
+  const b1f: Vec3 = [b1[0], b1[1], z1];
+
+  addQuad(mesh, [a0f, b0f, b1f, a1f], options.group, options.shade * 1.08);
+  addQuad(mesh, [a0, a1, b1, b0], options.group, options.shade * 0.82);
+  addQuad(mesh, [a0, b0, b0f, a0f], options.group, options.shade * 0.92);
+  addQuad(mesh, [a1, a1f, b1f, b1], options.group, options.shade * 0.74);
+  addQuad(mesh, [a0, a0f, a1f, a1], options.group, options.shade * 0.7);
+  addQuad(mesh, [b0, b1, b1f, b0f], options.group, options.shade * 0.86);
+
+  mesh.features.push({
+    type: options.group,
+    id: options.id,
+    center: [
+      (options.start[0] + options.end[0]) / 2,
+      (options.start[1] + options.end[1]) / 2,
+      (z0 + z1) / 2
+    ],
+    size: [length, options.thickness, options.depth],
+    rotationDeg: Math.atan2(dy, dx) * (180 / Math.PI)
+  });
 }
 
 function addBoxFeature(
