@@ -1,6 +1,6 @@
 import http from "node:http";
 
-import { runFenicsTopology } from "../../../../../solver-fenics/index";
+import { runFenicsTopology } from "../../../../solver-fenics/index";
 
 import {
   submitRemoteSimulationMock,
