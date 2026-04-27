@@ -45,46 +45,34 @@ const server = http.createServer(async (req, res) => {
         timestamp: new Date().toISOString(),
       });
     }
-if (req.method === "POST" && req.url === "/fenics-test") {
-  let body = "";
 
-  req.on("data", (chunk) => {
-    body += chunk.toString();
-  });
-
-  req.on("end", async () => {
-    try {
-      const parsed = body ? JSON.parse(body) : {};
-
-      const result = await runFenicsTopology({
-        nx: parsed.nx ?? 20,
-        ny: parsed.ny ?? 20,
-        nz: parsed.nz ?? 10,
-        loadDirection: parsed.loadDirection ?? "vertical"
-      });
-
-      respond(res, 200, result);
-    } catch (err) {
-      console.error("FEniCS test error:", err);
-      respond(res, 500, {
-        error: "fenics-test failed",
-        details: String(err)
+    if (req.method === "GET" && req.url === "/fenics-test") {
+      return respond(res, 200, {
+        ok: true,
+        route: "/fenics-test",
+        message: "Use POST with JSON body to run the FEniCS topology bridge.",
+        exampleBody: {
+          nx: 20,
+          ny: 20,
+          nz: 10,
+          loadDirection: "vertical",
+        },
       });
     }
-  });
 
-  return;
-}
+    if (req.method === "POST" && req.url === "/fenics-test") {
+      const body = await readJsonBody<Record<string, unknown>>(req);
 
-  const result = await runFenicsTopology({
-    nx: body.nx ?? 20,
-    ny: body.ny ?? 20,
-    nz: body.nz ?? 10,
-    loadDirection: body.loadDirection ?? "vertical"
-  });
+      const result = await runFenicsTopology({
+        nx: body.nx ?? 20,
+        ny: body.ny ?? 20,
+        nz: body.nz ?? 10,
+        loadDirection: body.loadDirection ?? "vertical",
+      });
 
-  return respond(res, 200, result);
-}
+      return respond(res, 200, result);
+    }
+
     if (req.method === "POST" && req.url === "/simulation/submit") {
       const body = await readJsonBody<RemoteSimulationSubmitRequest>(req);
 
@@ -184,7 +172,7 @@ async function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
 
     req.on("end", () => {
       try {
-        resolve(JSON.parse(data));
+        resolve(data ? JSON.parse(data) : {});
       } catch (err) {
         reject(err);
       }
