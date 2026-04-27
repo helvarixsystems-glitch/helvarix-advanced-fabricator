@@ -151,7 +151,7 @@ async function generateStructuralPart(
   };
 
   return {
-    revision: "REQ-GEN-006-FENICS-DENSITY-DIRECT",
+    revision: "REQ-GEN-007-FENICS-SMOOTH-SKELETON",
     exportState: "idle",
     estimatedMassKg: selected.estimatedMassKg,
     estimatedBurn: estimateComputeBurn(filteredCandidates.length, accepted.length),
@@ -182,7 +182,7 @@ async function generateStructuralPart(
         `${accepted.length} candidates advanced to FEniCS density-field geometry generation.`,
         `Selected candidate ${selected.id} with total score ${selected.totalScore.toFixed(1)}/100.`,
         `Selected geometry uses ${requirements.mounting.boltCount} bolt hole${requirements.mounting.boltCount === 1 ? "" : "s"} from the input requirements.`,
-        `Geometry source: ${String(selected.derivedParameters.geometrySource ?? "unknown")}.`,
+        `Geometry source: ${String(selected.derivedParameters.geometrySource ?? "unknown")}. Smooth swept-tube reconstruction is used for production-facing preview geometry.`,
         `Estimated mass is ${selected.estimatedMassKg.toFixed(3)} kg with estimated safety factor ${selected.safetyFactorEstimate.toFixed(2)}.`
       ]
     },
@@ -526,9 +526,9 @@ function buildDensitySurfaceMesh(
   addBoltHoleWallFeatures(mesh, { boltPositions, boltDiameterMm, depth, wall });
   addLoadInterfacePad(mesh, { width, height, depth, wall, requirements });
 
-  candidate.derivedParameters.geometrySource = "fenics-density-skeleton-reconstruction";
+  candidate.derivedParameters.geometrySource = "fenics-density-smooth-swept-skeleton";
   candidate.derivedParameters.topologyPostProcessing =
-    "FEniCS density field thresholded, reduced to bolt/load-connected skeleton paths, then rebuilt as smooth manufacturable beam members instead of raw voxels.";
+    "FEniCS density field reduced to bolt/load-connected skeleton paths, then rebuilt as smooth swept organic tube members with closed node pads instead of raw voxels.";
   candidate.derivedParameters.fenicsSkeletonNodes = skeleton.nodes.length;
   candidate.derivedParameters.fenicsSkeletonPaths = skeleton.paths.length;
   candidate.derivedParameters.fenicsDensityThreshold = DENSITY_THRESHOLD;
@@ -547,7 +547,7 @@ function buildDensitySurfaceMesh(
     bounds: { widthMm: width, heightMm: height, depthMm: depth },
     metadata: {
       candidateId: candidate.id,
-      source: "fenics-density-skeleton-reconstruction",
+      source: "fenics-density-smooth-swept-skeleton",
       boltCount,
       lighteningHoleCount: Math.max(1, Math.round(stats.openAreaPercent / 12)),
       ribCount,
@@ -702,13 +702,28 @@ function extractDensitySkeleton(args: {
 }
 
 function addPerimeterReferenceFrame(mesh: MeshBuilder, args: { width: number; height: number; depth: number; wall: number; railHeight: number; requirements: StructuralBracketRequirements }) {
-  const { width, height, depth, wall, railHeight } = args;
-  const frameThickness = Math.max(wall * 0.8, Math.min(width, height) * 0.022);
-  const frameDepth = depth * 0.72;
-  addBoxFeature(mesh, { id: "fenics-reference-top-load-rail", group: "load-plate", min: [-width / 2, height / 2 - railHeight * 0.72, -frameDepth / 2], max: [width / 2, height / 2 - railHeight * 0.28, frameDepth / 2], shade: 0.55 });
-  addBoxFeature(mesh, { id: "fenics-reference-bottom-mount-rail", group: "mounting-plate", min: [-width / 2, -height / 2 + railHeight * 0.18, -frameDepth / 2], max: [width / 2, -height / 2 + railHeight * 0.58, frameDepth / 2], shade: 0.52 });
-  addBoxFeature(mesh, { id: "fenics-reference-left-side-rail", group: "rib", min: [-width / 2, -height / 2, -frameDepth / 2], max: [-width / 2 + frameThickness, height / 2, frameDepth / 2], shade: 0.46 });
-  addBoxFeature(mesh, { id: "fenics-reference-right-side-rail", group: "rib", min: [width / 2 - frameThickness, -height / 2, -frameDepth / 2], max: [width / 2, height / 2, frameDepth / 2], shade: 0.46 });
+  const { width, height, depth, wall, railHeight, requirements } = args;
+  const frameDepth = depth * 0.62;
+  const bottomRailHeight = Math.max(wall * 1.45, railHeight * 0.34);
+  const topRailHeight = Math.max(wall * 1.35, railHeight * 0.3);
+  const bottomRailWidth = width * 0.82;
+  const topRailWidth = requirements.loadCase.direction === "lateral" ? width * 0.3 : width * 0.48;
+
+  addBoxFeature(mesh, {
+    id: "manufacturable-bottom-mounting-land",
+    group: "mounting-plate",
+    min: [-bottomRailWidth / 2, -height / 2 + railHeight * 0.18, -frameDepth / 2],
+    max: [bottomRailWidth / 2, -height / 2 + railHeight * 0.18 + bottomRailHeight, frameDepth / 2],
+    shade: 0.54
+  });
+
+  addBoxFeature(mesh, {
+    id: "manufacturable-top-load-land",
+    group: "load-plate",
+    min: [-topRailWidth / 2, height / 2 - railHeight * 0.66, -frameDepth / 2],
+    max: [topRailWidth / 2, height / 2 - railHeight * 0.66 + topRailHeight, frameDepth / 2],
+    shade: 0.6
+  });
 }
 
 function addDensityReconstructedSkeleton(mesh: MeshBuilder, args: { width: number; height: number; depth: number; wall: number; density: number[][][]; skeleton: DensitySkeleton; boltPositions: Array<[number, number]>; loadPoints: Array<[number, number]>; requirements: StructuralBracketRequirements }) {
@@ -732,70 +747,151 @@ function addDensityReconstructedSkeleton(mesh: MeshBuilder, args: { width: numbe
 }
 
 function addOrganicPathFeature(mesh: MeshBuilder, options: DensitySkeletonPath & { density: number[][][]; width: number; height: number; depth: number }) {
-  const segments = 8;
-  let previous = options.from;
-  const z = -options.depth / 2;
-  for (let index = 1; index <= segments; index += 1) {
-    const t = index / segments;
-    const point = quadraticPoint(options.from, options.control, options.to, t);
-    const midpoint: [number, number] = [(previous[0] + point[0]) / 2, (previous[1] + point[1]) / 2];
-    const densityValue = sampleDensityAtPoint(options.density, midpoint[0], midpoint[1], options.width, options.height);
-    const taper = 1 - Math.abs(t - 0.5) * 0.28;
-    const thickness = options.thickness * clamp(0.72 + densityValue * 0.58, 0.62, 1.45) * taper;
-    addOrientedBoxSegment(mesh, { id: `${options.id}-segment-${index}`, group: options.group, start: [previous[0], previous[1], z], end: [point[0], point[1], z], thickness, depth: options.depth, shade: options.shade + densityValue * 0.12 });
-    previous = point;
+  const curveSegments = 14;
+  const ringSegments = 14;
+  const points: Array<{ point: Vec3; radiusXy: number; radiusZ: number; shade: number }> = [];
+
+  for (let index = 0; index <= curveSegments; index += 1) {
+    const t = index / curveSegments;
+    const [x, y] = quadraticPoint(options.from, options.control, options.to, t);
+    const densityValue = sampleDensityAtPoint(options.density, x, y, options.width, options.height);
+    const endTaper = 0.82 + Math.sin(Math.PI * t) * 0.28;
+    const localRadius = (options.thickness / 2) * clamp(0.76 + densityValue * 0.62, 0.72, 1.48) * endTaper;
+
+    points.push({
+      point: [x, y, 0],
+      radiusXy: localRadius,
+      radiusZ: Math.max(options.depth * 0.23, localRadius * 1.35),
+      shade: options.shade + densityValue * 0.12
+    });
   }
+
+  addSweptOrganicTube(mesh, {
+    id: options.id,
+    group: options.group,
+    points,
+    ringSegments
+  });
 }
 
-function addOrientedBoxSegment(mesh: MeshBuilder, options: { id: string; group: string; start: Vec3; end: Vec3; thickness: number; depth: number; shade: number }) {
-  const dx = options.end[0] - options.start[0];
-  const dy = options.end[1] - options.start[1];
-  const length = Math.max(Math.hypot(dx, dy), 0.001);
-  const nx = -dy / length;
-  const ny = dx / length;
-  const halfThickness = options.thickness / 2;
-  const z0 = Math.min(options.start[2], options.end[2]);
-  const z1 = z0 + options.depth;
-  const a0: Vec3 = [options.start[0] + nx * halfThickness, options.start[1] + ny * halfThickness, z0];
-  const a1: Vec3 = [options.start[0] - nx * halfThickness, options.start[1] - ny * halfThickness, z0];
-  const b0: Vec3 = [options.end[0] + nx * halfThickness, options.end[1] + ny * halfThickness, z0];
-  const b1: Vec3 = [options.end[0] - nx * halfThickness, options.end[1] - ny * halfThickness, z0];
-  const a0f: Vec3 = [a0[0], a0[1], z1];
-  const a1f: Vec3 = [a1[0], a1[1], z1];
-  const b0f: Vec3 = [b0[0], b0[1], z1];
-  const b1f: Vec3 = [b1[0], b1[1], z1];
-  addQuad(mesh, [a0f, b0f, b1f, a1f], options.group, options.shade * 1.08);
-  addQuad(mesh, [a0, a1, b1, b0], options.group, options.shade * 0.78);
-  addQuad(mesh, [a0, b0, b0f, a0f], options.group, options.shade * 0.9);
-  addQuad(mesh, [a1, a1f, b1f, b1], options.group, options.shade * 0.74);
-  addQuad(mesh, [a0, a0f, a1f, a1], options.group, options.shade * 0.7);
-  addQuad(mesh, [b0, b1, b1f, b0f], options.group, options.shade * 0.86);
-  mesh.features.push({ type: options.group, id: options.id, center: [(options.start[0] + options.end[0]) / 2, (options.start[1] + options.end[1]) / 2, (z0 + z1) / 2], size: [length, options.thickness, options.depth], rotationDeg: Math.atan2(dy, dx) * (180 / Math.PI) } as RenderableMeshFeature);
+function addSweptOrganicTube(
+  mesh: MeshBuilder,
+  options: {
+    id: string;
+    group: string;
+    points: Array<{ point: Vec3; radiusXy: number; radiusZ: number; shade: number }>;
+    ringSegments: number;
+  }
+) {
+  if (options.points.length < 2) return;
+
+  const ringStarts: number[] = [];
+
+  for (let index = 0; index < options.points.length; index += 1) {
+    const current = options.points[index];
+    const previous = options.points[Math.max(0, index - 1)].point;
+    const next = options.points[Math.min(options.points.length - 1, index + 1)].point;
+    const tangent = normalize2d([next[0] - previous[0], next[1] - previous[1]]);
+    const normal: [number, number] = [-tangent[1], tangent[0]];
+    const start = mesh.vertices.length;
+    ringStarts.push(start);
+
+    for (let segment = 0; segment < options.ringSegments; segment += 1) {
+      const angle = (Math.PI * 2 * segment) / options.ringSegments;
+      const organicRipple = 1 + Math.sin(segment * 1.73 + index * 0.41) * 0.035;
+      const radial = Math.cos(angle) * current.radiusXy * organicRipple;
+      const vertical = Math.sin(angle) * current.radiusZ * organicRipple;
+
+      mesh.vertices.push([
+        current.point[0] + normal[0] * radial,
+        current.point[1] + normal[1] * radial,
+        current.point[2] + vertical
+      ]);
+    }
+  }
+
+  for (let ring = 0; ring < ringStarts.length - 1; ring += 1) {
+    const a = ringStarts[ring];
+    const b = ringStarts[ring + 1];
+    const shade = (options.points[ring].shade + options.points[ring + 1].shade) / 2;
+
+    for (let segment = 0; segment < options.ringSegments; segment += 1) {
+      const next = (segment + 1) % options.ringSegments;
+      addFace(mesh, [a + segment, a + next, b + next, b + segment], options.group, shade);
+    }
+  }
+
+  const firstCenter = mesh.vertices.length;
+  mesh.vertices.push(options.points[0].point);
+  const lastCenter = mesh.vertices.length;
+  mesh.vertices.push(options.points[options.points.length - 1].point);
+  const firstRing = ringStarts[0];
+  const lastRing = ringStarts[ringStarts.length - 1];
+
+  for (let segment = 0; segment < options.ringSegments; segment += 1) {
+    const next = (segment + 1) % options.ringSegments;
+    addFace(mesh, [firstCenter, firstRing + next, firstRing + segment], options.group, options.points[0].shade * 0.84);
+    addFace(mesh, [lastCenter, lastRing + segment, lastRing + next], options.group, options.points[options.points.length - 1].shade * 1.06);
+  }
+
+  const startPoint = options.points[0].point;
+  const endPoint = options.points[options.points.length - 1].point;
+  const length = Math.hypot(endPoint[0] - startPoint[0], endPoint[1] - startPoint[1], endPoint[2] - startPoint[2]);
+
+  mesh.features.push({
+    type: options.group,
+    id: options.id,
+    center: [(startPoint[0] + endPoint[0]) / 2, (startPoint[1] + endPoint[1]) / 2, (startPoint[2] + endPoint[2]) / 2],
+    size: [length, options.points[Math.floor(options.points.length / 2)].radiusXy * 2, options.points[Math.floor(options.points.length / 2)].radiusZ * 2],
+    rotationDeg: Math.atan2(endPoint[1] - startPoint[1], endPoint[0] - startPoint[0]) * (180 / Math.PI)
+  } as RenderableMeshFeature);
 }
 
 function addOrganicNodePad(mesh: MeshBuilder, options: { id: string; group: string; center: Vec3; radius: number; depth: number; segments: number; shade: number }) {
+  const rings = 8;
+  const segments = Math.max(options.segments, 24);
   const start = mesh.vertices.length;
-  const z0 = options.center[2] - options.depth / 2;
-  const z1 = options.center[2] + options.depth / 2;
-  for (const z of [z0, z1]) {
-    mesh.vertices.push([options.center[0], options.center[1], z]);
-    for (let index = 0; index < options.segments; index += 1) {
-      const angle = (Math.PI * 2 * index) / options.segments;
-      const organicRadius = options.radius * (0.94 + 0.08 * Math.sin(index * 1.7));
-      mesh.vertices.push([options.center[0] + Math.cos(angle) * organicRadius, options.center[1] + Math.sin(angle) * organicRadius, z]);
+
+  for (let ring = 0; ring <= rings; ring += 1) {
+    const v = ring / rings;
+    const polar = -Math.PI / 2 + Math.PI * v;
+    const z = options.center[2] + Math.sin(polar) * options.depth * 0.5;
+    const ringRadius = options.radius * Math.cos(polar) * (0.96 + 0.04 * Math.sin(ring * 1.27));
+
+    for (let segment = 0; segment < segments; segment += 1) {
+      const angle = (Math.PI * 2 * segment) / segments;
+      const organicRadius = ringRadius * (0.96 + 0.055 * Math.sin(segment * 1.7 + ring * 0.61));
+      mesh.vertices.push([
+        options.center[0] + Math.cos(angle) * organicRadius,
+        options.center[1] + Math.sin(angle) * organicRadius,
+        z
+      ]);
     }
   }
-  const backCenter = start;
-  const backRing = start + 1;
-  const frontCenter = start + 1 + options.segments;
-  const frontRing = frontCenter + 1;
-  for (let index = 0; index < options.segments; index += 1) {
-    const next = (index + 1) % options.segments;
-    addFace(mesh, [frontCenter, frontRing + index, frontRing + next], options.group, options.shade * 1.08);
-    addFace(mesh, [backCenter, backRing + next, backRing + index], options.group, options.shade * 0.76);
-    addFace(mesh, [backRing + index, backRing + next, frontRing + next, frontRing + index], options.group, options.shade * 0.86);
+
+  for (let ring = 0; ring < rings; ring += 1) {
+    const a = start + ring * segments;
+    const b = start + (ring + 1) * segments;
+    const shade = options.shade * (0.82 + (ring / rings) * 0.28);
+
+    for (let segment = 0; segment < segments; segment += 1) {
+      const next = (segment + 1) % segments;
+      addFace(mesh, [a + segment, a + next, b + next, b + segment], options.group, shade);
+    }
   }
-  mesh.features.push({ type: options.group, id: options.id, center: options.center, diameterMm: options.radius * 2, throughAxis: "z" } as RenderableMeshFeature);
+
+  mesh.features.push({
+    type: options.group,
+    id: options.id,
+    center: options.center,
+    diameterMm: options.radius * 2,
+    throughAxis: "z"
+  } as RenderableMeshFeature);
+}
+
+function normalize2d(vector: [number, number]): [number, number] {
+  const length = Math.max(Math.hypot(vector[0], vector[1]), 0.000001);
+  return [vector[0] / length, vector[1] / length];
 }
 
 function quadraticPoint(from: [number, number], control: [number, number], to: [number, number], t: number): [number, number] {
