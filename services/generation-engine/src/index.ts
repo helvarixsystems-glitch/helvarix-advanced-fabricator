@@ -562,212 +562,81 @@ function buildDensitySurfaceMesh(
   stats: DensityStats
 ): RenderableMesh {
   const mesh = createMeshBuilder();
+
   const width = candidate.widthMm;
   const height = candidate.heightMm;
   const depth = candidate.depthMm;
   const wall = candidate.wallThicknessMm;
+
+  const nx = density.length;
+  const ny = density[0]?.length ?? 0;
+  const nz = density[0]?.[0]?.length ?? 0;
 
   const boltCount = clamp(Math.round(requirements.mounting.boltCount), 1, 12);
   const boltDiameterMm = Math.max(requirements.mounting.boltDiameterMm, wall * 0.9);
   const railHeight = Math.max(wall * 2.2, height * 0.1);
   const boltPositions = buildBoltPositions(width, height, railHeight, boltCount);
   const loadPoints = buildLoadPoints(width, height, wall, requirements);
-  const loadPoint = averagePoints(loadPoints);
 
-  const field = topologyOptimizeDensityField(density, {
+  const requestedOpenArea = numberParam(candidate, "targetOpenAreaPercent", candidate.openAreaPercent ?? requirements.objectives.targetOpenAreaPercent ?? 58);
+  const targetSolidFraction = clamp(1 - requestedOpenArea / 100, 0.18, 0.72);
+
+  const flatDensity = density
+    .flat(2)
+    .map((value) => (Number.isFinite(value) ? clamp(value, 0, 1) : 0))
+    .sort((a, b) => a - b);
+  const cutoffIndex = clamp(Math.floor((1 - targetSolidFraction) * Math.max(flatDensity.length - 1, 0)), 0, Math.max(flatDensity.length - 1, 0));
+  const adaptiveThreshold = flatDensity.length ? clamp(flatDensity[cutoffIndex], 0.22, 0.78) : DENSITY_THRESHOLD;
+
+  const occupied = densityToOccupancy(density, adaptiveThreshold);
+
+  // Keep real interfaces, but do not reconstruct fake struts/tubes.
+  // These operations only preserve required load/support pads and open bolt holes.
+  enforceAnchorPads(occupied, {
     width,
     height,
     boltPositions,
     loadPoints,
-    boltDiameterMm,
-    requirements
+    boltPadRadiusMm: Math.max(boltDiameterMm * 1.55, wall * 2.8),
+    loadPadRadiusMm: Math.max(wall * 3.2, height * 0.08)
   });
 
-  const stressScale = clamp(requirements.loadCase.forceN / 2500, 0.82, 1.65);
-  const vibrationScale = clamp((requirements.loadCase.vibrationHz ?? 0) / 180, 0, 1.25);
-  const memberDepth = depth * 0.82;
-  const landDepth = depth * 0.9;
-  const organicDepth = depth * 0.76;
-  const minimumRadius = Math.max(wall * 0.7, Math.min(width, height) * 0.022);
-  const primaryRadius = Math.max(wall * 1.26, Math.min(width, height) * 0.045) * stressScale;
-  const secondaryRadius = Math.max(wall * 0.92, Math.min(width, height) * 0.031) * (1 + vibrationScale * 0.12);
-  const tertiaryRadius = Math.max(wall * 0.62, Math.min(width, height) * 0.022);
-
-  const sortedBolts = [...boltPositions].sort((a, b) => a[0] - b[0]);
-  const leftBolt = sortedBolts[0] ?? [-width * 0.28, -height * 0.34] as [number, number];
-  const rightBolt = sortedBolts[sortedBolts.length - 1] ?? [width * 0.28, -height * 0.34] as [number, number];
-  const boltCenter = averagePoints(boltPositions);
-
-  const baseLandHeight = Math.max(wall * 2.35, height * 0.075);
-  const baseLandWidth = clamp(requirements.mounting.spacingMm + boltDiameterMm * 4.9, width * 0.58, width * 0.92);
-  const baseY = boltCenter[1];
-
-  const loadLandWidth = requirements.loadCase.direction === "lateral" ? width * 0.34 : width * 0.48;
-  const loadLandHeight = Math.max(wall * 2.4, height * 0.085);
-  const loadLandCenter: [number, number] = [
-    clamp(loadPoint[0], -width * 0.2, width * 0.2),
-    clamp(loadPoint[1], height * 0.3, height * 0.44)
-  ];
-
-  // Required real interfaces: the optimizer may remove material, but it cannot remove datum faces.
-  // Keep these lands thin so they read like usable interfaces instead of blocky fake geometry.
-  addBoxFeature(mesh, {
-    id: "topopt-load-datum-land",
-    group: "load-plate",
-    min: [loadLandCenter[0] - loadLandWidth / 2, loadLandCenter[1] - loadLandHeight / 2, -landDepth / 2],
-    max: [loadLandCenter[0] + loadLandWidth / 2, loadLandCenter[1] + loadLandHeight / 2, landDepth / 2],
-    shade: 0.62
+  carveCylindricalVoids(occupied, {
+    width,
+    height,
+    boltPositions,
+    radiusMm: boltDiameterMm / 2
   });
 
-  addBoxFeature(mesh, {
-    id: "topopt-lower-datum-bridge",
-    group: "mounting-plate",
-    min: [-baseLandWidth / 2, baseY - baseLandHeight * 0.35, -landDepth * 0.42],
-    max: [baseLandWidth / 2, baseY + baseLandHeight * 0.35, landDepth * 0.42],
-    shade: 0.54
+  addOccupiedVoxelSurface(mesh, {
+    occupied,
+    width,
+    height,
+    depth,
+    cellWidth: width / Math.max(nx, 1),
+    cellHeight: height / Math.max(ny, 1),
+    cellDepth: depth / Math.max(nz, 1)
   });
 
-  for (const [x, y] of boltPositions) {
-    addFlatBossPad(mesh, {
-      id: `topopt-bolt-organic-boss-${mesh.features.length + 1}`,
-      group: "mounting-plate",
-      center: [x, y, 0],
-      radiusX: Math.max(boltDiameterMm * 1.72, wall * 2.4),
-      radiusY: Math.max(boltDiameterMm * 1.55, wall * 2.18),
-      depth: landDepth,
-      segments: 48,
-      shade: 0.64
-    });
-  }
+  const occupiedCount = countOccupied(occupied);
+  const renderedSolidFraction = occupiedCount.solid / Math.max(occupiedCount.total, 1);
+  const renderedOpenAreaPercent = (1 - renderedSolidFraction) * 100;
 
-  const hub: [number, number] = [
-    clamp(topologyFindLoadHub(field, width, height, boltPositions, loadLandCenter)[0], -width * 0.12, width * 0.12),
-    clamp(height * 0.08 + stats.averageDensity * height * 0.08, baseY + height * 0.18, loadLandCenter[1] - loadLandHeight * 0.95)
-  ];
-  const crown: [number, number] = [loadLandCenter[0], loadLandCenter[1] - loadLandHeight * 0.72];
-  const lowerHub: [number, number] = [
-    clamp((leftBolt[0] + rightBolt[0]) * 0.5, -width * 0.08, width * 0.08),
-    baseY + height * 0.15
-  ];
-
-  addOrganicNodePad(mesh, {
-    id: "topopt-organic-compression-hub",
-    group: "diagonal-web",
-    center: [hub[0], hub[1], 0],
-    radius: primaryRadius * 0.96,
-    depth: organicDepth,
-    segments: 48,
-    shade: 0.66
-  });
-
-  addOrganicNodePad(mesh, {
-    id: "topopt-lower-branching-node",
-    group: "diagonal-web",
-    center: [lowerHub[0], lowerHub[1], 0],
-    radius: secondaryRadius * 0.92,
-    depth: organicDepth * 0.9,
-    segments: 42,
-    shade: 0.6
-  });
-
-  const pathSummaries: Array<{ id: string; lengthMm: number }> = [];
-  const addCurvedMember = (id: string, group: string, points2d: Array<[number, number]>, radius: number, shade: number, depthScale = 1) => {
-    const smoothed = topologySmoothPath(points2d, width, height).map(([x, y]) => [x, y, 0] as Vec3);
-    addTopologyOptimizedMember(mesh, {
-      id,
-      group,
-      points: smoothed,
-      baseRadius: radius,
-      minRadius: minimumRadius,
-      depth: memberDepth * depthScale,
-      width,
-      height,
-      field,
-      shade
-    });
-    pathSummaries.push({ id, lengthMm: roundTo(polylineLength(smoothed), 0.1) });
-  };
-
-  const leftExit = offsetPointAlongSegment(leftBolt, hub, Math.max(boltDiameterMm * 1.65, primaryRadius * 1.42));
-  const rightExit = offsetPointAlongSegment(rightBolt, hub, Math.max(boltDiameterMm * 1.65, primaryRadius * 1.42));
-
-  addCurvedMember("topopt-left-primary-branch", "diagonal-web", [
-    crown,
-    [hub[0] - width * 0.07, (crown[1] + hub[1]) * 0.5],
-    hub,
-    [leftExit[0] + width * 0.05, hub[1] - height * 0.16],
-    leftExit
-  ], primaryRadius, 0.68, 1.02);
-
-  addCurvedMember("topopt-right-primary-branch", "diagonal-web", [
-    crown,
-    [hub[0] + width * 0.07, (crown[1] + hub[1]) * 0.5],
-    hub,
-    [rightExit[0] - width * 0.05, hub[1] - height * 0.16],
-    rightExit
-  ], primaryRadius, 0.68, 1.02);
-
-  addCurvedMember("topopt-center-compression-spine", "diagonal-web", [
-    crown,
-    [hub[0], crown[1] - height * 0.08],
-    hub,
-    lowerHub
-  ], primaryRadius * 0.72, 0.64, 0.88);
-
-  addCurvedMember("topopt-left-lower-branch", "rib", [
-    lowerHub,
-    [leftExit[0] + width * 0.09, lowerHub[1] - height * 0.04],
-    leftExit
-  ], secondaryRadius * 0.95, 0.52, 0.78);
-
-  addCurvedMember("topopt-right-lower-branch", "rib", [
-    lowerHub,
-    [rightExit[0] - width * 0.09, lowerHub[1] - height * 0.04],
-    rightExit
-  ], secondaryRadius * 0.95, 0.52, 0.78);
-
-  addCurvedMember("topopt-bottom-tension-arch", "rib", [
-    offsetPointAlongSegment(leftBolt, rightBolt, boltDiameterMm * 1.45),
-    [-width * 0.18, baseY - height * 0.035],
-    [0, baseY - height * 0.055],
-    [width * 0.18, baseY - height * 0.035],
-    offsetPointAlongSegment(rightBolt, leftBolt, boltDiameterMm * 1.45)
-  ], secondaryRadius * 0.72, 0.5, 0.64);
-
-  addCurvedMember("topopt-left-secondary-web", "gusset", [
-    [loadLandCenter[0] - loadLandWidth * 0.34, loadLandCenter[1] - loadLandHeight * 0.42],
-    [leftExit[0] + width * 0.14, hub[1] + height * 0.04],
-    [leftExit[0] + width * 0.05, lowerHub[1] + height * 0.04]
-  ], tertiaryRadius, 0.47, 0.52);
-
-  addCurvedMember("topopt-right-secondary-web", "gusset", [
-    [loadLandCenter[0] + loadLandWidth * 0.34, loadLandCenter[1] - loadLandHeight * 0.42],
-    [rightExit[0] - width * 0.14, hub[1] + height * 0.04],
-    [rightExit[0] - width * 0.05, lowerHub[1] + height * 0.04]
-  ], tertiaryRadius, 0.47, 0.52);
-
-  if (vibrationScale > 0.15) {
-    addCurvedMember("topopt-vibration-cross-tie", "gusset", [
-      [leftExit[0] + width * 0.08, lowerHub[1] + height * 0.02],
-      [0, lowerHub[1] + height * 0.105],
-      [rightExit[0] - width * 0.08, lowerHub[1] + height * 0.02]
-    ], tertiaryRadius * 0.82, 0.45, 0.46);
-  }
-
-  addBoltHoleWallFeatures(mesh, { boltPositions, boltDiameterMm, depth: landDepth * 1.06, wall });
-
-  candidate.derivedParameters.geometrySource = "solver-guided-organic-topology-bracket";
+  candidate.derivedParameters.geometrySource = "direct-density-field-surface";
+  candidate.derivedParameters.fenicsDensityThreshold = roundTo(adaptiveThreshold, 0.001);
+  candidate.derivedParameters.topologyOptimizationStage = "direct-density-voxel-surface";
   candidate.derivedParameters.topologyPostProcessing =
-    "Solver density is post-processed into a manufacturable organic bracket: thin datum lands are preserved, bolt holes stay open, and curved variable-radius branches connect load introduction to fixed supports.";
-  candidate.derivedParameters.fenicsDensityThreshold = DENSITY_THRESHOLD;
-  candidate.derivedParameters.topologyOptimizationStage = "organic-load-path-postprocess";
-  candidate.derivedParameters.topologyPrimaryPathCount = pathSummaries.length;
-  candidate.derivedParameters.topologyPrimaryPaths = JSON.stringify(pathSummaries);
-  candidate.derivedParameters.topologyHub = `${roundTo(hub[0], 0.1)},${roundTo(hub[1], 0.1)}`;
+    "Direct density-field surface extraction. No fake cylinders, tube skeleton, or block reconstruction is added. Only required bolt/load interface pads are preserved and bolt holes are carved open.";
+  candidate.derivedParameters.fenicsRenderedSolidFraction = roundTo(renderedSolidFraction, 0.001);
+  candidate.derivedParameters.fenicsRenderedOpenAreaPercent = roundTo(renderedOpenAreaPercent, 0.1);
 
-  const ribCount = mesh.features.filter((feature) => feature.type === "rib").length;
-  const gussetCount = mesh.features.filter((feature) => feature.type === "gusset").length;
-  const diagonalWebCount = mesh.features.filter((feature) => feature.type === "diagonal-web").length;
+  const densityFeature: RenderableMeshFeature = {
+    type: "mounting-plate",
+    id: "direct-density-topology-surface",
+    center: [0, 0, 0],
+    size: [width, height, depth]
+  };
+  mesh.features.push(densityFeature);
 
   return {
     version: "haf-render-mesh-v1",
@@ -779,12 +648,12 @@ function buildDensitySurfaceMesh(
     bounds: { widthMm: width, heightMm: height, depthMm: depth },
     metadata: {
       candidateId: candidate.id,
-      source: "generation-engine",
+      source: "density-field-direct",
+      solverEngine: String(candidate.derivedParameters.fenicsEngine ?? "unknown"),
+      densityThreshold: roundTo(adaptiveThreshold, 0.001),
+      solidFraction: roundTo(renderedSolidFraction, 0.001),
+      openAreaPercent: roundTo(renderedOpenAreaPercent, 0.1),
       boltCount,
-      lighteningHoleCount: Math.max(3, Math.round(stats.openAreaPercent / 14)),
-      ribCount,
-      gussetCount,
-      diagonalWebCount,
       skeletonized: true
     }
   };
