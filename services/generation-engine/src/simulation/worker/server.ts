@@ -1,5 +1,7 @@
 import http from "node:http";
 
+import { runFenicsTopology } from "../../../../../solver-fenics/index";
+
 import {
   submitRemoteSimulationMock,
   getRemoteSimulationStatusMock,
@@ -43,7 +45,18 @@ const server = http.createServer(async (req, res) => {
         timestamp: new Date().toISOString(),
       });
     }
+if (req.method === "POST" && req.url === "/fenics-test") {
+  const body = await readJsonBody<Record<string, unknown>>(req);
 
+  const result = await runFenicsTopology({
+    nx: body.nx ?? 20,
+    ny: body.ny ?? 20,
+    nz: body.nz ?? 10,
+    loadDirection: body.loadDirection ?? "vertical"
+  });
+
+  return respond(res, 200, result);
+}
     if (req.method === "POST" && req.url === "/simulation/submit") {
       const body = await readJsonBody<RemoteSimulationSubmitRequest>(req);
 
