@@ -38,6 +38,7 @@ type SafeGeometry = GeometryPreview & {
   latticeCellCount?: number;
   loadPathContinuityScore?: number;
   dimensions?: Record<string, number>;
+  renderMesh?: RenderableMesh;
   derived?: Record<string, any>;
   derivedParameters?: Record<string, unknown>;
 };
@@ -305,61 +306,6 @@ function drawGeneratedMesh(
   context.clearRect(0, 0, canvas.width, canvas.height);
 
   const mesh = buildMeshForFamily(geometry, family);
-  function getRenderableMesh(geometry?: SafeGeometry): MeshModel | undefined {
-  if (!geometry) return undefined;
-
-  const possibleMeshes = [
-    geometry.renderMesh,
-    geometry.derived?.renderMesh,
-    (geometry as Record<string, any>).geometry?.renderMesh,
-    (geometry as Record<string, any>).selectedCandidate?.renderMesh
-  ];
-
-  const renderMesh = possibleMeshes.find(isRenderableMesh);
-
-  if (!renderMesh) return undefined;
-
-  const vertices = renderMesh.vertices.map(normalizeRenderableVertex);
-
-  const faces = renderMesh.faces
-    .filter((face) => {
-      if (!Array.isArray(face.indices)) return false;
-      if (face.indices.length < 3) return false;
-
-      return face.indices.every(
-        (index) => Number.isInteger(index) && index >= 0 && index < vertices.length
-      );
-    })
-    .map((face) => ({
-      indices: face.indices,
-      shade: typeof face.shade === "number" ? face.shade : undefined
-    }));
-
-  if (!vertices.length || !faces.length) return undefined;
-
-  return centerAndScaleMesh({
-    vertices,
-    faces
-  });
-}
-
-function isRenderableMesh(value: unknown): value is RenderableMesh {
-  if (!value || typeof value !== "object") return false;
-
-  const mesh = value as Partial<RenderableMesh>;
-
-  return Array.isArray(mesh.vertices) && Array.isArray(mesh.faces);
-}
-
-function normalizeRenderableVertex(vertex: unknown): Vec3 {
-  if (!Array.isArray(vertex)) return [0, 0, 0];
-
-  const x = typeof vertex[0] === "number" && Number.isFinite(vertex[0]) ? vertex[0] : 0;
-  const y = typeof vertex[1] === "number" && Number.isFinite(vertex[1]) ? vertex[1] : 0;
-  const z = typeof vertex[2] === "number" && Number.isFinite(vertex[2]) ? vertex[2] : 0;
-
-  return [x, y, z];
-}
   const rotated = mesh.vertices.map((vertex) => rotateVertex(vertex, rotation.x, rotation.y));
   const projection = buildProjection(rotated, canvas.width, canvas.height, family);
   const projected = rotated.map((vertex) => projectVertex(vertex, projection));
@@ -572,6 +518,63 @@ function buildMeshForFamily(geometry: SafeGeometry, family: VisualFamily): MeshM
   if (family === "shell") return buildShellMesh(geometry);
 
   return buildStructuralBracketMesh(geometry);
+}
+
+function getRenderableMesh(geometry?: SafeGeometry): MeshModel | undefined {
+  if (!geometry) return undefined;
+
+  const possibleMeshes = [
+    geometry.renderMesh,
+    geometry.derived?.renderMesh,
+    (geometry as Record<string, any>).geometry?.renderMesh,
+    (geometry as Record<string, any>).selectedCandidate?.renderMesh
+  ];
+
+  const renderMesh = possibleMeshes.find(isRenderableMesh);
+
+  if (!renderMesh) return undefined;
+
+  const vertices = renderMesh.vertices.map(normalizeRenderableVertex);
+
+  const faces = renderMesh.faces
+    .filter((face) => {
+      if (!face || typeof face !== "object") return false;
+      if (!Array.isArray(face.indices)) return false;
+      if (face.indices.length < 3) return false;
+
+      return face.indices.every(
+        (index) => Number.isInteger(index) && index >= 0 && index < vertices.length
+      );
+    })
+    .map((face) => ({
+      indices: [...face.indices],
+      shade: typeof face.shade === "number" ? face.shade : undefined
+    }));
+
+  if (!vertices.length || !faces.length) return undefined;
+
+  return centerAndScaleMesh({
+    vertices,
+    faces
+  });
+}
+
+function isRenderableMesh(value: unknown): value is RenderableMesh {
+  if (!value || typeof value !== "object") return false;
+
+  const mesh = value as Partial<RenderableMesh>;
+
+  return Array.isArray(mesh.vertices) && Array.isArray(mesh.faces);
+}
+
+function normalizeRenderableVertex(vertex: unknown): Vec3 {
+  if (!Array.isArray(vertex)) return [0, 0, 0];
+
+  const x = typeof vertex[0] === "number" && Number.isFinite(vertex[0]) ? vertex[0] : 0;
+  const y = typeof vertex[1] === "number" && Number.isFinite(vertex[1]) ? vertex[1] : 0;
+  const z = typeof vertex[2] === "number" && Number.isFinite(vertex[2]) ? vertex[2] : 0;
+
+  return [x, y, z];
 }
 
 function buildStructuralBracketMesh(geometry: SafeGeometry): MeshModel {
