@@ -408,7 +408,7 @@ async function buildStructuralRenderMesh(
     targetOpenAreaPercent,
     safetyFactor: requirements.safetyFactor,
     forceN: requirements.loadCase.forceN,
-    maxIterations: 80
+    maxIterations: 35
   });
 
   const density = fenics?.density && isValidDensityField(fenics.density)
@@ -451,22 +451,35 @@ async function fetchFenicsDensity(input: {
     return { ok: false, error: "No FEniCS solver URL configured." };
   }
 
+  const controller = new AbortController();
+  const timeoutMs = 8500;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
     const response = await fetch(`${solverUrl.replace(/\/$/, "")}/fenics-test`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(input)
+      body: JSON.stringify(input),
+      signal: controller.signal
     });
 
-    const data = (await response.json()) as FenicsDensityResult;
+    const data = (await response.json().catch(() => ({}))) as FenicsDensityResult;
 
     if (!response.ok) {
-      return { ok: false, error: data.error ?? `FEniCS solver returned HTTP ${response.status}` };
+      return { ok: false, error: data.error ?? data.message ?? `FEniCS solver returned HTTP ${response.status}` };
     }
 
     return data;
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: message.includes("abort") || message.includes("Abort")
+        ? `FEniCS solver timed out after ${timeoutMs} ms; using local organic topology fallback.`
+        : message
+    };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -540,6 +553,7 @@ function buildEmergencyOrganicDensityField(
 
   return density;
 }
+
 
 function buildDensitySurfaceMesh(
   candidate: CandidateGeometry,
