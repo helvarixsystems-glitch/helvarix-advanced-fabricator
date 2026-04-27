@@ -50,12 +50,17 @@ const server = http.createServer(async (req, res) => {
       return respond(res, 200, {
         ok: true,
         route: "/fenics-test",
-        message: "Use POST with JSON body to run the FEniCS topology bridge.",
+        message: "Use POST with JSON body to run the SIMP topology optimizer.",
         exampleBody: {
-          nx: 20,
-          ny: 20,
-          nz: 10,
+          nx: 48,
+          ny: 48,
+          nz: 14,
           loadDirection: "vertical",
+          boltCount: 2,
+          targetOpenAreaPercent: 45,
+          safetyFactor: 1.5,
+          forceN: 2500,
+          maxIterations: 80,
         },
       });
     }
@@ -64,10 +69,21 @@ const server = http.createServer(async (req, res) => {
       const body = await readJsonBody<Record<string, unknown>>(req);
 
       const result = await runFenicsTopology({
-        nx: body.nx ?? 20,
-        ny: body.ny ?? 20,
-        nz: body.nz ?? 10,
+        nx: body.nx ?? 48,
+        ny: body.ny ?? 48,
+        nz: body.nz ?? 14,
         loadDirection: body.loadDirection ?? "vertical",
+        boltCount: body.boltCount ?? 2,
+        targetOpenAreaPercent: body.targetOpenAreaPercent ?? 45,
+        safetyFactor: body.safetyFactor ?? 1.5,
+        forceN: body.forceN ?? 2500,
+        maxIterations: body.maxIterations ?? 80,
+        minIterations: body.minIterations ?? 25,
+        changeTolerance: body.changeTolerance ?? 0.012,
+        penalization: body.penalization ?? 3.0,
+        filterRadius: body.filterRadius ?? 3.0,
+        youngsModulus: body.youngsModulus ?? 70.0e9,
+        poissonRatio: body.poissonRatio ?? 0.33,
       });
 
       return respond(res, 200, result);
