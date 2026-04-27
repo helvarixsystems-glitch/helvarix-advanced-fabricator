@@ -57,6 +57,8 @@ type FenicsDensityResult = {
   engine?: string;
   density?: number[][][];
   error?: string;
+  message?: string;
+  route?: string;
 };
 
 type DensityStats = {
@@ -405,24 +407,31 @@ async function buildStructuralRenderMesh(
     boltCount: requirements.mounting.boltCount,
     targetOpenAreaPercent,
     safetyFactor: requirements.safetyFactor,
-    forceN: requirements.loadCase.forceN
+    forceN: requirements.loadCase.forceN,
+    maxIterations: 80
   });
 
+  const density = fenics?.density && isValidDensityField(fenics.density)
+    ? fenics.density
+    : buildEmergencyOrganicDensityField(candidate, requirements, { nx: 48, ny: 48, nz: 14 });
+
   if (!fenics?.density || !isValidDensityField(fenics.density)) {
-    candidate.derivedParameters.fenicsStatus = "unavailable";
-    candidate.derivedParameters.fenicsError = fenics?.error ?? "No valid density field returned.";
-    return buildDeterministicFallbackMesh(candidate, requirements);
+    candidate.derivedParameters.fenicsStatus = "fallback-organic-density";
+    candidate.derivedParameters.fenicsError = fenics?.error ?? fenics?.message ?? "No valid density field returned by solver.";
+    candidate.derivedParameters.fenicsEngine = fenics?.engine ?? "local-organic-density-fallback";
   }
 
-  const stats = summarizeDensity(fenics.density);
-  candidate.derivedParameters.fenicsStatus = "connected";
-  candidate.derivedParameters.fenicsEngine = fenics.engine ?? "unknown";
+  const stats = summarizeDensity(density);
+  if (fenics?.density && isValidDensityField(fenics.density)) {
+    candidate.derivedParameters.fenicsStatus = "connected";
+  }
+  candidate.derivedParameters.fenicsEngine = fenics?.engine ?? String(candidate.derivedParameters.fenicsEngine ?? "unknown");
   candidate.derivedParameters.fenicsGrid = { nx: stats.nx, ny: stats.ny, nz: stats.nz };
   candidate.derivedParameters.fenicsSolidFraction = roundTo(stats.solidFraction, 0.001);
   candidate.derivedParameters.fenicsAverageDensity = roundTo(stats.averageDensity, 0.001);
   candidate.derivedParameters.fenicsOpenAreaPercent = roundTo(stats.openAreaPercent, 0.1);
 
-  return buildDensitySurfaceMesh(candidate, requirements, fenics.density, stats);
+  return buildDensitySurfaceMesh(candidate, requirements, density, stats);
 }
 
 async function fetchFenicsDensity(input: {
@@ -434,6 +443,7 @@ async function fetchFenicsDensity(input: {
   targetOpenAreaPercent: number;
   safetyFactor: number;
   forceN: number;
+  maxIterations?: number;
 }): Promise<FenicsDensityResult | undefined> {
   const solverUrl = getFenicsSolverUrl();
 
@@ -463,6 +473,72 @@ async function fetchFenicsDensity(input: {
 function getFenicsSolverUrl() {
   const processEnv = typeof process !== "undefined" ? process.env : undefined;
   return processEnv?.HELVARIX_SOLVER_URL?.trim() || processEnv?.VITE_HELVARIX_SOLVER_URL?.trim() || DEFAULT_FENICS_SOLVER_URL;
+}
+
+function buildEmergencyOrganicDensityField(
+  candidate: CandidateGeometry,
+  requirements: StructuralBracketRequirements,
+  grid: { nx: number; ny: number; nz: number }
+): number[][][] {
+  const width = candidate.widthMm;
+  const height = candidate.heightMm;
+  const wall = candidate.wallThicknessMm;
+  const boltCount = clamp(Math.round(requirements.mounting.boltCount), 1, 12);
+  const railHeight = Math.max(wall * 2.2, height * 0.1);
+  const boltPositions = buildBoltPositions(width, height, railHeight, boltCount);
+  const loadPoints = buildLoadPoints(width, height, wall, requirements);
+  const loadCenter = averagePoints(loadPoints);
+  const boltCenter = averagePoints(boltPositions);
+  const targetSolidFraction = clamp(1 - (requirements.objectives.targetOpenAreaPercent ?? candidate.openAreaPercent ?? 58) / 100, 0.24, 0.58);
+  const loadScale = clamp(requirements.loadCase.forceN / 2500, 0.8, 1.65);
+  const pathSigma = Math.max(width, height) * 0.055 * loadScale;
+  const padSigma = Math.max(requirements.mounting.boltDiameterMm * 1.85, Math.max(width, height) * 0.045);
+  const hub: [number, number] = [
+    clamp((loadCenter[0] + boltCenter[0]) * 0.5, -width * 0.12, width * 0.12),
+    clamp(boltCenter[1] + (loadCenter[1] - boltCenter[1]) * 0.53, -height * 0.05, height * 0.22)
+  ];
+  const lowerHub: [number, number] = [boltCenter[0], boltCenter[1] + height * 0.14];
+  const raw2d: number[][] = [];
+
+  for (let x = 0; x < grid.nx; x += 1) {
+    raw2d[x] = [];
+    for (let y = 0; y < grid.ny; y += 1) {
+      const point = topologyGridToMm(x, y, grid.nx, grid.ny, width, height);
+      const loadPad = Math.max(...loadPoints.map((load) => gaussian2d(point, load, padSigma * 1.05)));
+      const boltPad = Math.max(...boltPositions.map((bolt) => gaussian2d(point, bolt, padSigma)));
+      const primaryPaths = Math.max(
+        ...boltPositions.map((bolt) => Math.max(
+          Math.exp(-(distancePointToSegment2d(point, loadCenter, bolt) ** 2) / (2 * pathSigma ** 2)),
+          Math.exp(-(distancePointToSegment2d(point, hub, bolt) ** 2) / (2 * (pathSigma * 0.82) ** 2)),
+          Math.exp(-(distancePointToSegment2d(point, loadCenter, hub) ** 2) / (2 * (pathSigma * 0.9) ** 2))
+        ))
+      );
+      const lowerBridge = Math.max(
+        ...boltPositions.map((bolt) => Math.exp(-(distancePointToSegment2d(point, lowerHub, bolt) ** 2) / (2 * (pathSigma * 0.72) ** 2)))
+      );
+      const centerVoid = Math.exp(-(distance2d(point[0], point[1], 0, (hub[1] + lowerHub[1]) * 0.5) ** 2) / (2 * (Math.min(width, height) * 0.17) ** 2));
+      raw2d[x][y] = clamp(loadPad * 0.38 + boltPad * 0.34 + primaryPaths * 0.55 + lowerBridge * 0.3 - centerVoid * 0.18, 0, 1);
+    }
+  }
+
+  const smoothed = topologySmooth2d(raw2d, 2);
+  const threshold = chooseScalarThreshold(smoothed, targetSolidFraction);
+  const density: number[][][] = [];
+
+  for (let x = 0; x < grid.nx; x += 1) {
+    density[x] = [];
+    for (let y = 0; y < grid.ny; y += 1) {
+      density[x][y] = [];
+      for (let z = 0; z < grid.nz; z += 1) {
+        const zNorm = Math.abs((z + 0.5) / Math.max(grid.nz, 1) - 0.5) * 2;
+        const shellFactor = clamp(1 - Math.max(0, zNorm - 0.72) * 1.8, 0.25, 1);
+        const value = clamp((smoothed[x][y] - threshold) * 2.4 + 0.52, 0, 1) * shellFactor;
+        density[x][y][z] = value;
+      }
+    }
+  }
+
+  return density;
 }
 
 function buildDensitySurfaceMesh(
