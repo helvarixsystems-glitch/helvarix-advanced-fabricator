@@ -46,7 +46,35 @@ const server = http.createServer(async (req, res) => {
       });
     }
 if (req.method === "POST" && req.url === "/fenics-test") {
-  const body = await readJsonBody<Record<string, unknown>>(req);
+  let body = "";
+
+  req.on("data", (chunk) => {
+    body += chunk.toString();
+  });
+
+  req.on("end", async () => {
+    try {
+      const parsed = body ? JSON.parse(body) : {};
+
+      const result = await runFenicsTopology({
+        nx: parsed.nx ?? 20,
+        ny: parsed.ny ?? 20,
+        nz: parsed.nz ?? 10,
+        loadDirection: parsed.loadDirection ?? "vertical"
+      });
+
+      respond(res, 200, result);
+    } catch (err) {
+      console.error("FEniCS test error:", err);
+      respond(res, 500, {
+        error: "fenics-test failed",
+        details: String(err)
+      });
+    }
+  });
+
+  return;
+}
 
   const result = await runFenicsTopology({
     nx: body.nx ?? 20,
