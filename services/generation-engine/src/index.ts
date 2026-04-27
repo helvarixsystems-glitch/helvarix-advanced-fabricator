@@ -555,23 +555,22 @@ function buildTopologyOptimizedStructuralMesh(
     requirements
   });
 
-  for (const cell of field.cells) {
-    addTopologyCell(mesh, {
-      id: `topology-cell-${cell.column}-${cell.row}`,
-      group: cell.group,
-      center: [cell.x, cell.y, 0],
-      size: [field.cellWidth * 1.04, field.cellHeight * 1.04, depth],
-      density: cell.density,
-      stress: cell.stress
-    });
-  }
-
   addPerimeterSkin(mesh, {
     width,
     height,
     depth,
     wall,
     field
+  });
+
+  addTopologySkeletonMembers(mesh, {
+    width,
+    height,
+    depth,
+    wall,
+    field,
+    candidate,
+    requirements
   });
 
   addBoltHoleWallFeatures(mesh, {
@@ -593,6 +592,9 @@ function buildTopologyOptimizedStructuralMesh(
   const ribCount = numberParam(candidate, "ribCount", 4);
   const gussetCount = numberParam(candidate, "gussetCount", 4);
   const diagonalWebCount = numberParam(candidate, "diagonalWebCount", 6);
+  const skeletonMembers = mesh.features.filter((feature) =>
+    feature.type === "diagonal-web" || feature.type === "gusset" || feature.type === "rib"
+  ).length;
 
   const renderMesh: RenderableMesh = {
     version: "haf-render-mesh-v1",
@@ -610,7 +612,7 @@ function buildTopologyOptimizedStructuralMesh(
       candidateId: candidate.id,
       source: "generation-engine",
       boltCount,
-      lighteningHoleCount: field.cells.length,
+      lighteningHoleCount: Math.max(0, Math.round((field.actualOpenAreaPercent / 100) * 12)),
       ribCount,
       gussetCount,
       diagonalWebCount,
@@ -623,7 +625,10 @@ function buildTopologyOptimizedStructuralMesh(
   candidate.derivedParameters.topologyGridRows = field.rows;
   candidate.derivedParameters.topologyOpenAreaPercent = actualOpenAreaPercent;
   candidate.derivedParameters.topologyThreshold = roundTo(field.threshold, 0.001);
-  candidate.derivedParameters.topologyMode = "density-field-load-path";
+  candidate.derivedParameters.topologyMode = "skeleton-reconstructed-load-path";
+  candidate.derivedParameters.topologySkeletonMembers = skeletonMembers;
+  candidate.derivedParameters.topologyPostProcessing =
+    "thresholded density field, connectivity-reinforced load paths, beam skeleton extraction, manufacturable member reconstruction";
 
   return renderMesh;
 }
@@ -1008,6 +1013,312 @@ function reinforceConnectivity(args: {
       drawGridLine(boltPositions[index], boltPositions[index + 1], 1);
     }
   }
+}
+
+
+function addTopologySkeletonMembers(
+  mesh: MeshBuilder,
+  args: {
+    width: number;
+    height: number;
+    depth: number;
+    wall: number;
+    field: TopologyField;
+    candidate: CandidateGeometry;
+    requirements: StructuralBracketRequirements;
+  }
+) {
+  const { width, height, depth, wall, field, candidate, requirements } = args;
+  const boltPositions = field.boltPositions;
+  const loadPoints = field.loadPoints;
+
+  const loadScale = clamp(requirements.loadCase.forceN / 2500, 0.72, 1.45);
+  const vibrationScale = clamp((requirements.loadCase.vibrationHz ?? 0) / 150, 0, 1.2);
+  const openAreaTarget = clamp(
+    requirements.objectives.targetOpenAreaPercent ?? candidate.openAreaPercent ?? 34,
+    18,
+    62
+  );
+
+  const primaryThickness = Math.max(wall * 1.45, Math.min(width, height) * 0.066) * loadScale;
+  const secondaryThickness = Math.max(wall * 0.92, Math.min(width, height) * 0.038) * (0.92 + vibrationScale * 0.18);
+  const tertiaryThickness = Math.max(wall * 0.62, Math.min(width, height) * 0.025);
+  const memberDepth = depth * 0.9;
+  const frontZ = -memberDepth / 2;
+
+  const loadCenter = averagePoints(loadPoints);
+  const boltCenter = averagePoints(boltPositions);
+  const neutralNode: [number, number] = [
+    clamp((loadCenter[0] + boltCenter[0]) / 2, -width * 0.22, width * 0.22),
+    clamp((loadCenter[1] + boltCenter[1]) / 2, -height * 0.18, height * 0.26)
+  ];
+
+  const upperNode: [number, number] = [
+    clamp(loadCenter[0], -width * 0.18, width * 0.18),
+    clamp(height * 0.21, -height * 0.1, height * 0.32)
+  ];
+
+  const lowerNode: [number, number] = [
+    clamp(boltCenter[0], -width * 0.2, width * 0.2),
+    clamp(-height * 0.24, -height * 0.36, height * 0.02)
+  ];
+
+  addSolidNodePad(mesh, {
+    id: "topology-neutral-node",
+    group: "rib",
+    center: [neutralNode[0], neutralNode[1], 0],
+    radius: primaryThickness * 1.06,
+    depth: memberDepth,
+    segments: 24,
+    shade: 0.72
+  });
+
+  addSolidNodePad(mesh, {
+    id: "topology-upper-load-node",
+    group: "load-plate",
+    center: [upperNode[0], upperNode[1], 0],
+    radius: primaryThickness * 0.92,
+    depth: memberDepth,
+    segments: 24,
+    shade: 0.78
+  });
+
+  if (boltPositions.length >= 2) {
+    addSolidNodePad(mesh, {
+      id: "topology-lower-bolt-bridge-node",
+      group: "mounting-plate",
+      center: [lowerNode[0], lowerNode[1], 0],
+      radius: secondaryThickness * 0.95,
+      depth: memberDepth,
+      segments: 24,
+      shade: 0.68
+    });
+  }
+
+  boltPositions.forEach((bolt, index) => {
+    const startToNeutral = offsetPointAlongSegment(bolt, neutralNode, field.boltPadRadius * 0.72);
+    const startToLower = offsetPointAlongSegment(bolt, lowerNode, field.boltPadRadius * 0.6);
+
+    addOrientedWebFeature(mesh, {
+      id: `primary-bolt-to-core-${index + 1}`,
+      group: "diagonal-web",
+      start: [startToNeutral[0], startToNeutral[1], frontZ],
+      end: [neutralNode[0], neutralNode[1], frontZ],
+      thickness: primaryThickness,
+      depth: memberDepth,
+      shade: 0.72
+    });
+
+    if (boltPositions.length > 1) {
+      addOrientedWebFeature(mesh, {
+        id: `lower-bolt-spreader-${index + 1}`,
+        group: "gusset",
+        start: [startToLower[0], startToLower[1], frontZ],
+        end: [lowerNode[0], lowerNode[1], frontZ],
+        thickness: secondaryThickness,
+        depth: memberDepth * 0.96,
+        shade: 0.64
+      });
+    }
+  });
+
+  addOrientedWebFeature(mesh, {
+    id: "primary-core-to-upper-load-node",
+    group: "diagonal-web",
+    start: [neutralNode[0], neutralNode[1], frontZ],
+    end: [upperNode[0], upperNode[1], frontZ],
+    thickness: primaryThickness * 0.92,
+    depth: memberDepth,
+    shade: 0.74
+  });
+
+  loadPoints.forEach((loadPoint, index) => {
+    const end = offsetPointAlongSegment(loadPoint, upperNode, Math.max(wall * 1.6, primaryThickness * 0.7));
+
+    addOrientedWebFeature(mesh, {
+      id: `upper-node-to-load-interface-${index + 1}`,
+      group: "gusset",
+      start: [upperNode[0], upperNode[1], frontZ],
+      end: [end[0], end[1], frontZ],
+      thickness: secondaryThickness * 1.05,
+      depth: memberDepth * 0.96,
+      shade: 0.69
+    });
+  });
+
+  if (boltPositions.length >= 2) {
+    for (let index = 0; index < boltPositions.length - 1; index += 1) {
+      const a = offsetPointAlongSegment(boltPositions[index], boltPositions[index + 1], field.boltPadRadius * 0.66);
+      const b = offsetPointAlongSegment(boltPositions[index + 1], boltPositions[index], field.boltPadRadius * 0.66);
+
+      addOrientedWebFeature(mesh, {
+        id: `bolt-to-bolt-tension-tie-${index + 1}`,
+        group: "rib",
+        start: [a[0], a[1], frontZ],
+        end: [b[0], b[1], frontZ],
+        thickness: secondaryThickness * 0.92,
+        depth: memberDepth * 0.9,
+        shade: 0.58
+      });
+    }
+  }
+
+  const branchCount = clamp(Math.round(numberParam(candidate, "diagonalWebCount", 6) / 2), 2, 5);
+  for (let index = 0; index < branchCount; index += 1) {
+    const t = branchCount === 1 ? 0.5 : index / (branchCount - 1);
+    const side = index % 2 === 0 ? -1 : 1;
+    const y = lerp(-height * 0.12, height * 0.18, t);
+    const x = side * lerp(width * 0.18, width * 0.34, t);
+    const anchor: [number, number] = [x, y];
+
+    const source: [number, number] = index % 2 === 0 ? neutralNode : upperNode;
+    addOrientedWebFeature(mesh, {
+      id: `secondary-branch-load-web-${index + 1}`,
+      group: "diagonal-web",
+      start: [source[0], source[1], frontZ],
+      end: [anchor[0], anchor[1], frontZ],
+      thickness: tertiaryThickness * (1.05 + vibrationScale * 0.12),
+      depth: memberDepth * 0.82,
+      shade: 0.56
+    });
+  }
+
+  if (vibrationScale > 0.2) {
+    const braceY = clamp(neutralNode[1] - height * 0.08, -height * 0.28, height * 0.16);
+    addOrientedWebFeature(mesh, {
+      id: "vibration-cross-tie-left",
+      group: "rib",
+      start: [-width * 0.34, braceY, frontZ],
+      end: [width * 0.34, braceY + height * 0.07, frontZ],
+      thickness: tertiaryThickness * 0.95,
+      depth: memberDepth * 0.74,
+      shade: 0.52
+    });
+    addOrientedWebFeature(mesh, {
+      id: "vibration-cross-tie-right",
+      group: "rib",
+      start: [-width * 0.34, braceY + height * 0.07, frontZ],
+      end: [width * 0.34, braceY, frontZ],
+      thickness: tertiaryThickness * 0.95,
+      depth: memberDepth * 0.74,
+      shade: 0.52
+    });
+  }
+
+  const edgeRelief = clamp(openAreaTarget / 100, 0.18, 0.62);
+  const sideNodeRadius = Math.max(wall * 1.35, primaryThickness * 0.58);
+  const sideY = clamp(neutralNode[1], -height * 0.14, height * 0.22);
+
+  for (const side of [-1, 1]) {
+    const sideNode: [number, number] = [side * width * (0.39 - edgeRelief * 0.08), sideY];
+    addSolidNodePad(mesh, {
+      id: `side-stability-node-${side < 0 ? "left" : "right"}`,
+      group: "rib",
+      center: [sideNode[0], sideNode[1], 0],
+      radius: sideNodeRadius,
+      depth: memberDepth * 0.82,
+      segments: 20,
+      shade: 0.56
+    });
+
+    addOrientedWebFeature(mesh, {
+      id: `side-node-to-core-${side < 0 ? "left" : "right"}`,
+      group: "gusset",
+      start: [sideNode[0], sideNode[1], frontZ],
+      end: [neutralNode[0], neutralNode[1], frontZ],
+      thickness: tertiaryThickness,
+      depth: memberDepth * 0.78,
+      shade: 0.54
+    });
+  }
+}
+
+function addSolidNodePad(
+  mesh: MeshBuilder,
+  options: {
+    id: string;
+    group: "rib" | "gusset" | "diagonal-web" | "mounting-plate" | "load-plate";
+    center: Vec3;
+    radius: number;
+    depth: number;
+    segments: number;
+    shade: number;
+  }
+) {
+  const start = mesh.vertices.length;
+  const z0 = options.center[2] - options.depth / 2;
+  const z1 = options.center[2] + options.depth / 2;
+
+  for (const z of [z0, z1]) {
+    mesh.vertices.push([options.center[0], options.center[1], z]);
+    for (let index = 0; index < options.segments; index += 1) {
+      const angle = (Math.PI * 2 * index) / options.segments;
+      mesh.vertices.push([
+        options.center[0] + Math.cos(angle) * options.radius,
+        options.center[1] + Math.sin(angle) * options.radius,
+        z
+      ]);
+    }
+  }
+
+  const backCenter = start;
+  const backRing = start + 1;
+  const frontCenter = start + 1 + options.segments;
+  const frontRing = frontCenter + 1;
+
+  for (let index = 0; index < options.segments; index += 1) {
+    const next = (index + 1) % options.segments;
+
+    mesh.faces.push({
+      indices: [frontCenter, frontRing + index, frontRing + next],
+      group: options.group,
+      shade: options.shade * 1.06
+    });
+
+    mesh.faces.push({
+      indices: [backCenter, backRing + next, backRing + index],
+      group: options.group,
+      shade: options.shade * 0.76
+    });
+
+    mesh.faces.push({
+      indices: [backRing + index, backRing + next, frontRing + next, frontRing + index],
+      group: options.group,
+      shade: options.shade * 0.86
+    });
+  }
+
+  mesh.features.push({
+    type: options.group,
+    id: options.id,
+    center: options.center,
+    diameterMm: options.radius * 2,
+    throughAxis: "z"
+  });
+}
+
+function averagePoints(points: Array<[number, number]>): [number, number] {
+  if (!points.length) return [0, 0];
+
+  const sum = points.reduce(
+    (current, point) => [current[0] + point[0], current[1] + point[1]] as [number, number],
+    [0, 0] as [number, number]
+  );
+
+  return [sum[0] / points.length, sum[1] / points.length];
+}
+
+function offsetPointAlongSegment(
+  from: [number, number],
+  to: [number, number],
+  distance: number
+): [number, number] {
+  const dx = to[0] - from[0];
+  const dy = to[1] - from[1];
+  const length = Math.max(Math.hypot(dx, dy), 0.0001);
+  const t = clamp(distance / length, 0, 0.85);
+
+  return [from[0] + dx * t, from[1] + dy * t];
 }
 
 function addTopologyCell(
