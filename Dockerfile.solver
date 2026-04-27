@@ -18,6 +18,8 @@ COPY apps ./apps
 COPY tsconfig*.json ./
 COPY render.yaml ./
 
+RUN pip3 install --break-system-packages -r services/solver-fenics/requirements.txt
+
 RUN npm install
 RUN npm install -g tsx
 
