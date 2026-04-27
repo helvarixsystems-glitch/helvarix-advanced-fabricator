@@ -39,6 +39,8 @@ type SafeGeometry = GeometryPreview & {
   loadPathContinuityScore?: number;
   dimensions?: Record<string, number>;
   renderMesh?: RenderableMesh;
+  geometry?: Record<string, any>;
+  selectedCandidate?: Record<string, any>;
   derived?: Record<string, any>;
   derivedParameters?: Record<string, unknown>;
 };
@@ -526,8 +528,10 @@ function getRenderableMesh(geometry?: SafeGeometry): MeshModel | undefined {
   const possibleMeshes = [
     geometry.renderMesh,
     geometry.derived?.renderMesh,
-    (geometry as Record<string, any>).geometry?.renderMesh,
-    (geometry as Record<string, any>).selectedCandidate?.renderMesh
+    geometry.geometry?.renderMesh,
+    geometry.selectedCandidate?.renderMesh,
+    geometry.derived?.geometry?.renderMesh,
+    geometry.derived?.selectedCandidate?.renderMesh
   ];
 
   const renderMesh = possibleMeshes.find(isRenderableMesh);
@@ -535,21 +539,48 @@ function getRenderableMesh(geometry?: SafeGeometry): MeshModel | undefined {
   if (!renderMesh) return undefined;
 
   const vertices = renderMesh.vertices.map(normalizeRenderableVertex);
+function normalizeRenderableFace(face: unknown, vertexCount: number): MeshFace | undefined {
+  if (Array.isArray(face)) {
+    if (face.length < 3) return undefined;
 
+    const indices = face.filter((index) => Number.isInteger(index)) as number[];
+
+    if (indices.length < 3) return undefined;
+
+    const valid = indices.every((index) => index >= 0 && index < vertexCount);
+
+    if (!valid) return undefined;
+
+    return {
+      indices,
+      shade: 0.74
+    };
+  }
+
+  if (!face || typeof face !== "object") return undefined;
+
+  const faceObject = face as Record<string, unknown>;
+  const rawIndices = faceObject.indices;
+
+  if (!Array.isArray(rawIndices)) return undefined;
+  if (rawIndices.length < 3) return undefined;
+
+  const indices = rawIndices.filter((index) => Number.isInteger(index)) as number[];
+
+  if (indices.length < 3) return undefined;
+
+  const valid = indices.every((index) => index >= 0 && index < vertexCount);
+
+  if (!valid) return undefined;
+
+  return {
+    indices,
+    shade: typeof faceObject.shade === "number" ? faceObject.shade : 0.74
+  };
+}
   const faces = renderMesh.faces
-    .filter((face) => {
-      if (!face || typeof face !== "object") return false;
-      if (!Array.isArray(face.indices)) return false;
-      if (face.indices.length < 3) return false;
-
-      return face.indices.every(
-        (index) => Number.isInteger(index) && index >= 0 && index < vertices.length
-      );
-    })
-    .map((face) => ({
-      indices: [...face.indices],
-      shade: typeof face.shade === "number" ? face.shade : undefined
-    }));
+    .map((face) => normalizeRenderableFace(face, vertices.length))
+    .filter((face): face is MeshFace => Boolean(face));
 
   if (!vertices.length || !faces.length) return undefined;
 
@@ -568,13 +599,25 @@ function isRenderableMesh(value: unknown): value is RenderableMesh {
 }
 
 function normalizeRenderableVertex(vertex: unknown): Vec3 {
-  if (!Array.isArray(vertex)) return [0, 0, 0];
+  if (Array.isArray(vertex)) {
+    const x = typeof vertex[0] === "number" && Number.isFinite(vertex[0]) ? vertex[0] : 0;
+    const y = typeof vertex[1] === "number" && Number.isFinite(vertex[1]) ? vertex[1] : 0;
+    const z = typeof vertex[2] === "number" && Number.isFinite(vertex[2]) ? vertex[2] : 0;
 
-  const x = typeof vertex[0] === "number" && Number.isFinite(vertex[0]) ? vertex[0] : 0;
-  const y = typeof vertex[1] === "number" && Number.isFinite(vertex[1]) ? vertex[1] : 0;
-  const z = typeof vertex[2] === "number" && Number.isFinite(vertex[2]) ? vertex[2] : 0;
+    return [x, y, z];
+  }
 
-  return [x, y, z];
+  if (vertex && typeof vertex === "object") {
+    const point = vertex as Record<string, unknown>;
+
+    const x = typeof point.x === "number" && Number.isFinite(point.x) ? point.x : 0;
+    const y = typeof point.y === "number" && Number.isFinite(point.y) ? point.y : 0;
+    const z = typeof point.z === "number" && Number.isFinite(point.z) ? point.z : 0;
+
+    return [x, y, z];
+  }
+
+  return [0, 0, 0];
 }
 
 function buildStructuralBracketMesh(geometry: SafeGeometry): MeshModel {
