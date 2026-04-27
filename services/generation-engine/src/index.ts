@@ -476,23 +476,13 @@ function buildDensitySurfaceMesh(
   const height = candidate.heightMm;
   const depth = candidate.depthMm;
   const wall = candidate.wallThicknessMm;
-  const railHeight = Math.max(wall * 2.1, height * 0.095);
+  const railHeight = Math.max(wall * 2.15, height * 0.105);
   const boltCount = clamp(Math.round(requirements.mounting.boltCount), 1, 12);
   const boltDiameterMm = Math.max(requirements.mounting.boltDiameterMm, wall * 0.9);
   const boltPositions = buildBoltPositions(width, height, railHeight, boltCount);
   const loadPoints = buildLoadPoints(width, height, wall, requirements);
-  const occupied = densityToOccupancy(density, DENSITY_THRESHOLD);
-
-  carveCylindricalVoids(occupied, {
-    width,
-    height,
-    boltPositions,
-    radiusMm: Math.max(boltDiameterMm * 0.52, wall * 0.55)
-  });
-
-  const skeleton = extractDensitySkeleton({
+  const productionSkeleton = extractProductionBracketSkeleton({
     density,
-    occupied,
     width,
     height,
     depth,
@@ -502,36 +492,49 @@ function buildDensitySurfaceMesh(
     requirements
   });
 
-  addPerimeterReferenceFrame(mesh, {
+  addProductionMountingInterface(mesh, {
     width,
     height,
     depth,
     wall,
     railHeight,
+    boltPositions,
+    boltDiameterMm,
     requirements
   });
 
-  addDensityReconstructedSkeleton(mesh, {
+  addProductionLoadInterface(mesh, {
+    width,
+    height,
+    depth,
+    wall,
+    railHeight,
+    loadPoints,
+    skeleton: productionSkeleton,
+    requirements
+  });
+
+  addProductionLoadPathMembers(mesh, {
     width,
     height,
     depth,
     wall,
     density,
-    skeleton,
+    skeleton: productionSkeleton,
     boltPositions,
     loadPoints,
     requirements
   });
 
   addBoltHoleWallFeatures(mesh, { boltPositions, boltDiameterMm, depth, wall });
-  addLoadInterfacePad(mesh, { width, height, depth, wall, requirements });
 
-  candidate.derivedParameters.geometrySource = "fenics-density-smooth-swept-skeleton";
+  candidate.derivedParameters.geometrySource = "fenics-density-manufacturable-bracket-reconstruction";
   candidate.derivedParameters.topologyPostProcessing =
-    "FEniCS density field reduced to bolt/load-connected skeleton paths, then rebuilt as smooth swept organic tube members with closed node pads instead of raw voxels.";
-  candidate.derivedParameters.fenicsSkeletonNodes = skeleton.nodes.length;
-  candidate.derivedParameters.fenicsSkeletonPaths = skeleton.paths.length;
+    "FEniCS density field interpreted into manufacturable bracket geometry: flat mounting lands, bolt bosses with through holes, a defined load interface, primary load-path members, shear webs, and controlled node transitions.";
+  candidate.derivedParameters.fenicsSkeletonNodes = productionSkeleton.nodes.length;
+  candidate.derivedParameters.fenicsSkeletonPaths = productionSkeleton.paths.length;
   candidate.derivedParameters.fenicsDensityThreshold = DENSITY_THRESHOLD;
+  candidate.derivedParameters.productionGeometryStage = "interface-locked-load-path-rebuild";
 
   const ribCount = mesh.features.filter((feature) => feature.type === "rib").length;
   const gussetCount = mesh.features.filter((feature) => feature.type === "gusset").length;
@@ -547,15 +550,470 @@ function buildDensitySurfaceMesh(
     bounds: { widthMm: width, heightMm: height, depthMm: depth },
     metadata: {
       candidateId: candidate.id,
-      source: "fenics-density-smooth-swept-skeleton",
+      source: "fenics-density-manufacturable-bracket-reconstruction",
       boltCount,
-      lighteningHoleCount: Math.max(1, Math.round(stats.openAreaPercent / 12)),
+      lighteningHoleCount: Math.max(1, Math.round(stats.openAreaPercent / 14)),
       ribCount,
       gussetCount,
       diagonalWebCount,
       skeletonized: true
     }
   };
+}
+
+type ProductionBracketSkeleton = {
+  nodes: DensitySkeletonNode[];
+  paths: DensitySkeletonPath[];
+  loadHub: [number, number];
+  lowerBridge: [number, number];
+  loadLandCenter: [number, number];
+};
+
+function extractProductionBracketSkeleton(args: {
+  density: number[][][];
+  width: number;
+  height: number;
+  depth: number;
+  wall: number;
+  boltPositions: Array<[number, number]>;
+  loadPoints: Array<[number, number]>;
+  requirements: StructuralBracketRequirements;
+}): ProductionBracketSkeleton {
+  const { density, width, height, wall, boltPositions, loadPoints, requirements } = args;
+  const boltCenter = averagePoints(boltPositions);
+  const loadCenter = averagePoints(loadPoints);
+  const densityCentroid = weightedDensityCentroid(density, width, height);
+  const loadScale = clamp(requirements.loadCase.forceN / 2500, 0.78, 1.68);
+  const vibrationScale = clamp((requirements.loadCase.vibrationHz ?? 0) / 160, 0, 1.25);
+  const baseThickness = Math.max(wall * 1.35, Math.min(width, height) * 0.05) * loadScale;
+
+  const loadLandCenter: [number, number] = [
+    clamp(loadCenter[0], -width * 0.16, width * 0.16),
+    clamp(loadCenter[1], height * 0.29, height * 0.43)
+  ];
+
+  const loadHub: [number, number] = [
+    clamp(densityCentroid[0] * 0.28 + loadLandCenter[0] * 0.52 + boltCenter[0] * 0.2, -width * 0.15, width * 0.15),
+    clamp(densityCentroid[1] * 0.25 + height * 0.08 + loadLandCenter[1] * 0.22, -height * 0.03, height * 0.21)
+  ];
+
+  const lowerBridge: [number, number] = [
+    clamp(boltCenter[0], -width * 0.08, width * 0.08),
+    clamp(boltCenter[1] + height * 0.095, -height * 0.31, -height * 0.08)
+  ];
+
+  const nodes: DensitySkeletonNode[] = [
+    {
+      id: "production-primary-load-hub",
+      point: loadHub,
+      radius: baseThickness * 1.1,
+      group: "diagonal-web"
+    },
+    {
+      id: "production-load-land-transition-node",
+      point: [loadLandCenter[0], loadLandCenter[1] - height * 0.075],
+      radius: baseThickness * 0.84,
+      group: "load-plate"
+    },
+    {
+      id: "production-lower-bolt-bridge-node",
+      point: lowerBridge,
+      radius: baseThickness * 0.72,
+      group: "rib"
+    }
+  ];
+
+  const paths: DensitySkeletonPath[] = [];
+
+  boltPositions.forEach((bolt, index) => {
+    const start = offsetPointAlongSegment(bolt, loadHub, Math.max(wall * 2.3, baseThickness * 1.25));
+    const side = bolt[0] < loadHub[0] ? -1 : 1;
+    const control = densityGuidedControlPoint({
+      density,
+      width,
+      height,
+      from: start,
+      to: loadHub,
+      preferredOffset: [side * width * 0.045, height * 0.065]
+    });
+    const localDensity = sampleDensityAtPoint(density, (start[0] + loadHub[0]) / 2, (start[1] + loadHub[1]) / 2, width, height);
+
+    paths.push({
+      id: `production-primary-load-arm-${index + 1}`,
+      from: start,
+      control,
+      to: loadHub,
+      thickness: baseThickness * clamp(1.04 + localDensity * 0.28, 0.94, 1.34),
+      group: "diagonal-web",
+      shade: 0.66
+    });
+
+    const lowerStart = offsetPointAlongSegment(bolt, lowerBridge, Math.max(wall * 2.0, baseThickness * 1.05));
+    paths.push({
+      id: `production-lower-shear-tie-${index + 1}`,
+      from: lowerStart,
+      control: [(lowerStart[0] + lowerBridge[0]) / 2, lowerBridge[1] - height * 0.025],
+      to: lowerBridge,
+      thickness: baseThickness * 0.46,
+      group: "rib",
+      shade: 0.5
+    });
+  });
+
+  paths.push({
+    id: "production-load-hub-to-load-land",
+    from: loadHub,
+    control: densityGuidedControlPoint({
+      density,
+      width,
+      height,
+      from: loadHub,
+      to: loadLandCenter,
+      preferredOffset: [0, height * 0.035]
+    }),
+    to: [loadLandCenter[0], loadLandCenter[1] - height * 0.055],
+    thickness: baseThickness * 0.88,
+    group: "diagonal-web",
+    shade: 0.7
+  });
+
+  if (boltPositions.length >= 2) {
+    const sortedBolts = [...boltPositions].sort((a, b) => a[0] - b[0]);
+    const left = sortedBolts[0];
+    const right = sortedBolts[sortedBolts.length - 1];
+    paths.push({
+      id: "production-bolt-to-bolt-mounting-tie",
+      from: offsetPointAlongSegment(left, right, Math.max(wall * 2.1, baseThickness * 1.16)),
+      control: [0, Math.min(left[1], right[1]) - height * 0.018],
+      to: offsetPointAlongSegment(right, left, Math.max(wall * 2.1, baseThickness * 1.16)),
+      thickness: baseThickness * 0.44,
+      group: "rib",
+      shade: 0.48
+    });
+  }
+
+  if (vibrationScale > 0.18) {
+    paths.push({
+      id: "production-vibration-lateral-stabilizer",
+      from: [-width * 0.31, lowerBridge[1] + height * 0.14],
+      control: [0, loadHub[1] - height * 0.035],
+      to: [width * 0.31, lowerBridge[1] + height * 0.17],
+      thickness: baseThickness * (0.26 + vibrationScale * 0.12),
+      group: "gusset",
+      shade: 0.46
+    });
+  }
+
+  return {
+    nodes,
+    paths,
+    loadHub,
+    lowerBridge,
+    loadLandCenter
+  };
+}
+
+function addProductionMountingInterface(
+  mesh: MeshBuilder,
+  args: {
+    width: number;
+    height: number;
+    depth: number;
+    wall: number;
+    railHeight: number;
+    boltPositions: Array<[number, number]>;
+    boltDiameterMm: number;
+    requirements: StructuralBracketRequirements;
+  }
+) {
+  const { width, height, depth, wall, railHeight, boltPositions, boltDiameterMm } = args;
+  const landDepth = depth * 0.86;
+  const baseLandWidth = clamp(
+    args.requirements.mounting.spacingMm + boltDiameterMm * 4.3,
+    width * 0.64,
+    width * 0.92
+  );
+  const baseLandHeight = Math.max(wall * 2.4, railHeight * 0.58);
+  const baseY0 = -height / 2 + railHeight * 0.18;
+  const baseY1 = baseY0 + baseLandHeight;
+
+  addBoxFeature(mesh, {
+    id: "production-flat-mounting-land",
+    group: "mounting-plate",
+    min: [-baseLandWidth / 2, baseY0, -landDepth / 2],
+    max: [baseLandWidth / 2, baseY1, landDepth / 2],
+    shade: 0.56
+  });
+
+  for (let index = 0; index < boltPositions.length; index += 1) {
+    const [x, y] = boltPositions[index];
+    const padRadius = Math.max(boltDiameterMm * 1.42, wall * 2.05);
+    addFlatBossPad(mesh, {
+      id: `production-flat-bolt-seat-${index + 1}`,
+      group: "mounting-plate",
+      center: [x, y, 0],
+      radiusX: padRadius * 1.22,
+      radiusY: padRadius,
+      depth: landDepth * 1.05,
+      segments: 32,
+      shade: 0.62
+    });
+  }
+}
+
+function addProductionLoadInterface(
+  mesh: MeshBuilder,
+  args: {
+    width: number;
+    height: number;
+    depth: number;
+    wall: number;
+    railHeight: number;
+    loadPoints: Array<[number, number]>;
+    skeleton: ProductionBracketSkeleton;
+    requirements: StructuralBracketRequirements;
+  }
+) {
+  const { width, height, depth, wall, railHeight, skeleton, requirements } = args;
+  const landDepth = depth * 0.82;
+  const loadWidth = requirements.loadCase.direction === "lateral" ? width * 0.34 : width * 0.48;
+  const loadHeight = Math.max(wall * 2.35, railHeight * 0.48);
+  const center = skeleton.loadLandCenter;
+
+  addBoxFeature(mesh, {
+    id: "production-flat-load-interface-land",
+    group: "load-plate",
+    min: [center[0] - loadWidth / 2, center[1] - loadHeight / 2, -landDepth / 2],
+    max: [center[0] + loadWidth / 2, center[1] + loadHeight / 2, landDepth / 2],
+    shade: 0.64
+  });
+
+  addFlatBossPad(mesh, {
+    id: "production-load-spreader-boss",
+    group: "load-plate",
+    center: [center[0], center[1] - loadHeight * 0.62, 0],
+    radiusX: Math.max(loadWidth * 0.22, wall * 2.1),
+    radiusY: Math.max(loadHeight * 0.82, wall * 2.0),
+    depth: landDepth * 0.9,
+    segments: 32,
+    shade: 0.68
+  });
+}
+
+function addProductionLoadPathMembers(
+  mesh: MeshBuilder,
+  args: {
+    width: number;
+    height: number;
+    depth: number;
+    wall: number;
+    density: number[][][];
+    skeleton: ProductionBracketSkeleton;
+    boltPositions: Array<[number, number]>;
+    loadPoints: Array<[number, number]>;
+    requirements: StructuralBracketRequirements;
+  }
+) {
+  const { width, height, depth, wall, density, skeleton } = args;
+  const memberDepth = depth * 0.72;
+
+  for (const node of skeleton.nodes) {
+    const densityAtNode = sampleDensityAtPoint(density, node.point[0], node.point[1], width, height);
+    addOrganicNodePad(mesh, {
+      id: node.id,
+      group: node.group,
+      center: [node.point[0], node.point[1], 0],
+      radius: node.radius * clamp(0.82 + densityAtNode * 0.28, 0.78, 1.18),
+      depth: memberDepth * (node.group === "load-plate" ? 0.88 : 1),
+      segments: 30,
+      shade: node.group === "load-plate" ? 0.7 : 0.64
+    });
+  }
+
+  for (const path of skeleton.paths) {
+    addProductionPathMember(mesh, { ...path, density, width, height, depth: memberDepth });
+  }
+
+  addProductionTriangularShearWebs(mesh, {
+    width,
+    height,
+    depth,
+    wall,
+    skeleton,
+    boltPositions: args.boltPositions
+  });
+}
+
+function addProductionPathMember(
+  mesh: MeshBuilder,
+  options: DensitySkeletonPath & { density: number[][][]; width: number; height: number; depth: number }
+) {
+  const curveSegments = 16;
+  const ringSegments = 16;
+  const points: Array<{ point: Vec3; radiusXy: number; radiusZ: number; shade: number }> = [];
+
+  for (let index = 0; index <= curveSegments; index += 1) {
+    const t = index / curveSegments;
+    const [x, y] = quadraticPoint(options.from, options.control, options.to, t);
+    const densityValue = sampleDensityAtPoint(options.density, x, y, options.width, options.height);
+    const taper = 0.76 + Math.sin(Math.PI * t) * 0.3;
+    const localRadius = (options.thickness / 2) * clamp(0.84 + densityValue * 0.42, 0.78, 1.34) * taper;
+
+    points.push({
+      point: [x, y, 0],
+      radiusXy: localRadius,
+      radiusZ: Math.max(options.depth * 0.18, localRadius * 1.18),
+      shade: options.shade + densityValue * 0.1
+    });
+  }
+
+  addSweptOrganicTube(mesh, {
+    id: options.id,
+    group: options.group,
+    points,
+    ringSegments
+  });
+}
+
+function addProductionTriangularShearWebs(
+  mesh: MeshBuilder,
+  args: {
+    width: number;
+    height: number;
+    depth: number;
+    wall: number;
+    skeleton: ProductionBracketSkeleton;
+    boltPositions: Array<[number, number]>;
+  }
+) {
+  const { depth, wall, skeleton, boltPositions } = args;
+  if (boltPositions.length < 2) return;
+
+  const sorted = [...boltPositions].sort((a, b) => a[0] - b[0]);
+  const left = sorted[0];
+  const right = sorted[sorted.length - 1];
+  const inset = Math.max(wall * 2.8, 8);
+  const z0 = -depth * 0.11;
+  const z1 = depth * 0.11;
+
+  addExtrudedPolygon(mesh, {
+    id: "production-left-open-triangular-shear-web",
+    group: "gusset",
+    points: [
+      offsetPointAlongSegment(left, skeleton.loadHub, inset),
+      [skeleton.loadHub[0] - wall * 0.75, skeleton.loadHub[1] - wall * 0.2],
+      [skeleton.lowerBridge[0] - wall * 0.7, skeleton.lowerBridge[1] + wall * 0.35]
+    ],
+    z0,
+    z1,
+    shade: 0.42
+  });
+
+  addExtrudedPolygon(mesh, {
+    id: "production-right-open-triangular-shear-web",
+    group: "gusset",
+    points: [
+      offsetPointAlongSegment(right, skeleton.loadHub, inset),
+      [skeleton.loadHub[0] + wall * 0.75, skeleton.loadHub[1] - wall * 0.2],
+      [skeleton.lowerBridge[0] + wall * 0.7, skeleton.lowerBridge[1] + wall * 0.35]
+    ],
+    z0,
+    z1,
+    shade: 0.42
+  });
+}
+
+function addFlatBossPad(
+  mesh: MeshBuilder,
+  options: {
+    id: string;
+    group: string;
+    center: Vec3;
+    radiusX: number;
+    radiusY: number;
+    depth: number;
+    segments: number;
+    shade: number;
+  }
+) {
+  const start = mesh.vertices.length;
+  const z0 = options.center[2] - options.depth / 2;
+  const z1 = options.center[2] + options.depth / 2;
+
+  for (const z of [z0, z1]) {
+    mesh.vertices.push([options.center[0], options.center[1], z]);
+    for (let index = 0; index < options.segments; index += 1) {
+      const angle = (Math.PI * 2 * index) / options.segments;
+      mesh.vertices.push([
+        options.center[0] + Math.cos(angle) * options.radiusX,
+        options.center[1] + Math.sin(angle) * options.radiusY,
+        z
+      ]);
+    }
+  }
+
+  const backCenter = start;
+  const backRing = start + 1;
+  const frontCenter = start + 1 + options.segments;
+  const frontRing = frontCenter + 1;
+
+  for (let index = 0; index < options.segments; index += 1) {
+    const next = (index + 1) % options.segments;
+    addFace(mesh, [frontCenter, frontRing + index, frontRing + next], options.group, options.shade * 1.08);
+    addFace(mesh, [backCenter, backRing + next, backRing + index], options.group, options.shade * 0.78);
+    addFace(mesh, [backRing + index, backRing + next, frontRing + next, frontRing + index], options.group, options.shade * 0.9);
+  }
+
+  mesh.features.push({
+    type: options.group,
+    id: options.id,
+    center: options.center,
+    size: [options.radiusX * 2, options.radiusY * 2, options.depth]
+  } as RenderableMeshFeature);
+}
+
+function addExtrudedPolygon(
+  mesh: MeshBuilder,
+  options: {
+    id: string;
+    group: string;
+    points: Array<[number, number]>;
+    z0: number;
+    z1: number;
+    shade: number;
+  }
+) {
+  if (options.points.length < 3) return;
+
+  const start = mesh.vertices.length;
+  for (const [x, y] of options.points) {
+    mesh.vertices.push([x, y, options.z0]);
+  }
+  for (const [x, y] of options.points) {
+    mesh.vertices.push([x, y, options.z1]);
+  }
+
+  for (let index = 1; index < options.points.length - 1; index += 1) {
+    addFace(mesh, [start, start + index, start + index + 1], options.group, options.shade * 0.72);
+    addFace(mesh, [start + options.points.length, start + options.points.length + index + 1, start + options.points.length + index], options.group, options.shade * 1.05);
+  }
+
+  for (let index = 0; index < options.points.length; index += 1) {
+    const next = (index + 1) % options.points.length;
+    addFace(mesh, [start + index, start + next, start + options.points.length + next, start + options.points.length + index], options.group, options.shade * 0.86);
+  }
+
+  const center = options.points.reduce(
+    (sum, point) => [sum[0] + point[0], sum[1] + point[1]] as [number, number],
+    [0, 0] as [number, number]
+  );
+
+  mesh.features.push({
+    type: options.group,
+    id: options.id,
+    center: [center[0] / options.points.length, center[1] / options.points.length, (options.z0 + options.z1) / 2],
+    size: [0, 0, Math.abs(options.z1 - options.z0)]
+  } as RenderableMeshFeature);
 }
 
 type DensitySkeletonNode = {
