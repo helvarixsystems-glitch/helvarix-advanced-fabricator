@@ -1423,9 +1423,10 @@ function buildViewerGeometry(generation: GenerationSummary | null) {
   const selected = result.selectedCandidate;
 
   const renderMesh =
-    result.derived?.renderMesh ??
-    result.geometry?.renderMesh ??
-    selected?.renderMesh;
+  result.derived?.renderMesh ??
+  result.geometry?.renderMesh ??
+  result.geometry?.derived?.renderMesh ??
+  selected?.renderMesh;
 
   return {
     family: result.geometry?.silhouette ?? generation.input.componentFamily,
@@ -1486,12 +1487,12 @@ function buildViewerGeometry(generation: GenerationSummary | null) {
 
     derivedParameters: result.derived?.derivedParameters ?? selected?.derivedParameters,
 
-    notes: [
-      ...(result.geometry?.notes ?? []),
-      renderMesh
-        ? `ENGINE MESH ACTIVE: ${renderMesh.vertices.length} vertices, ${renderMesh.faces.length} faces.`
-        : "WARNING: No renderMesh reached the viewer. Viewer is using fallback geometry."
-    ]
+   notes: [
+  renderMesh
+    ? `ENGINE MESH ACTIVE: ${renderMesh.vertices.length} vertices, ${renderMesh.faces.length} faces.`
+    : "WARNING: No renderMesh reached the viewer. Viewer is using fallback geometry.",
+  ...(result.geometry?.notes ?? [])
+]
   };
 }
 
