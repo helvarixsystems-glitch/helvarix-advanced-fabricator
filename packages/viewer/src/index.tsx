@@ -308,25 +308,64 @@ function drawGeneratedMesh(
   context.clearRect(0, 0, canvas.width, canvas.height);
 
   const mesh = buildMeshForFamily(geometry, family);
+
+  if (!mesh.vertices.length || !mesh.faces.length) {
+    return;
+  }
+
   const rotated = mesh.vertices.map((vertex) => rotateVertex(vertex, rotation.x, rotation.y));
   const projection = buildProjection(rotated, canvas.width, canvas.height, family);
   const projected = rotated.map((vertex) => projectVertex(vertex, projection));
 
-  const faces = mesh.faces
-    .map((face) => {
-      const points = face.indices.map((index) => projected[index]);
-      const z =
-        face.indices.reduce((sum, index) => sum + rotated[index][2], 0) /
-        Math.max(face.indices.length, 1);
+  const materialTone = getMaterialTone(geometry.material);
+  const renderMeshActive = Boolean(getRenderableMesh(geometry));
 
-      return { face, points, z };
+  const lightDirection = normalizeVector([-0.35, 0.48, 0.8]);
+  const viewDirection = normalizeVector([0, 0, 1]);
+
+  const drawableFaces = mesh.faces
+    .map((face) => {
+      const points = face.indices
+        .map((index) => projected[index])
+        .filter((point): point is [number, number] => Boolean(point));
+
+      const vertices = face.indices
+        .map((index) => rotated[index])
+        .filter((vertex): vertex is Vec3 => Boolean(vertex));
+
+      if (points.length < 3 || vertices.length < 3) {
+        return null;
+      }
+
+      const normal = getFaceNormal(vertices[0], vertices[1], vertices[2]);
+      const centroid = getFaceCentroid(vertices);
+      const averageZ =
+        vertices.reduce((sum, vertex) => sum + vertex[2], 0) / Math.max(vertices.length, 1);
+      const facing = dot(normal, viewDirection);
+      const light = clamp(dot(normal, lightDirection), -1, 1);
+      const stress = estimateFaceStress(centroid, geometry, family);
+
+      return {
+        face,
+        points,
+        vertices,
+        normal,
+        centroid,
+        averageZ,
+        facing,
+        light,
+        stress
+      };
     })
-    .sort((a, b) => a.z - b.z);
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    .sort((a, b) => a.averageZ - b.averageZ);
 
   context.save();
+  context.lineJoin = "round";
+  context.lineCap = "round";
 
-  for (const item of faces) {
-    if (item.points.length < 3) continue;
+  for (const item of drawableFaces) {
+    const shade = clamp((item.face.shade ?? 0.74) * (0.78 + Math.max(item.light, 0) * 0.34), 0.28, 1);
 
     context.beginPath();
     context.moveTo(item.points[0][0], item.points[0][1]);
@@ -337,37 +376,39 @@ function drawGeneratedMesh(
 
     context.closePath();
 
-    const shade = item.face.shade ?? 0.74;
-    const materialTone = getMaterialTone(geometry.material);
-
     if (mode === "simulation") {
-      context.fillStyle =
-        family === "bell-nozzle" || family === "grid-fin" || family === "nosecone"
-          ? `rgba(${Math.floor(125 * shade)}, ${Math.floor(145 * shade)}, ${Math.floor(
-              170 * shade
-            )}, 0.94)`
-          : `rgba(${Math.floor(180 * shade)}, ${Math.floor(120 * shade)}, ${Math.floor(
-              82 * shade
-            )}, 0.94)`;
+      context.fillStyle = getStressFill(item.stress, item.facing);
+      context.strokeStyle = getStressStroke(item.stress);
+      context.lineWidth = 0.95 * ratio;
+    } else if (mode === "mesh") {
+      const gray = Math.floor(210 * shade);
+      context.fillStyle = `rgba(${gray}, ${gray}, ${gray}, ${renderMeshActive ? 0.28 : 0.38})`;
+      context.strokeStyle = renderMeshActive ? "rgba(0, 0, 0, 0.58)" : "rgba(0, 0, 0, 0.45)";
+      context.lineWidth = renderMeshActive ? 0.9 * ratio : 0.75 * ratio;
     } else {
       context.fillStyle = `rgba(${Math.floor(materialTone[0] * shade)}, ${Math.floor(
         materialTone[1] * shade
-      )}, ${Math.floor(materialTone[2] * shade)}, 0.97)`;
+      )}, ${Math.floor(materialTone[2] * shade)}, 0.96)`;
+      context.strokeStyle = renderMeshActive ? "rgba(0,0,0,0.24)" : "rgba(0,0,0,0.18)";
+      context.lineWidth = 0.75 * ratio;
     }
-
-    context.strokeStyle = mode === "mesh" ? "rgba(0,0,0,0.52)" : "rgba(0,0,0,0.2)";
-    context.lineWidth = mode === "mesh" ? 1.15 * ratio : 0.75 * ratio;
 
     context.fill();
     context.stroke();
   }
 
   if (mode === "mesh") {
-    drawMeshWireframe(context, mesh, projected, ratio);
+    drawMeshWireframe(context, mesh, projected, ratio, renderMeshActive);
+    drawMeshNodes(context, projected, ratio, renderMeshActive);
   }
 
   if (mode === "simulation") {
-    drawMeshStressOverlay(context, canvas.width, canvas.height, family, status, ratio);
+    drawStressHotspots(context, drawableFaces, ratio);
+    drawStressLegend(context, canvas.width, canvas.height, ratio, status);
+  }
+
+  if (renderMeshActive) {
+    drawMeshOriginMarker(context, projection.centerX, projection.centerY, ratio);
   }
 
   context.restore();
@@ -400,23 +441,23 @@ function buildProjection(vertices: Vec3[], width: number, height: number, family
 
   const widthFit =
     family === "structural-bracket"
-      ? width * 0.52
+      ? width * 0.62
       : family === "bell-nozzle"
-        ? width * 0.48
-        : width * 0.54;
+        ? width * 0.56
+        : width * 0.6;
 
   const heightFit =
     family === "structural-bracket"
-      ? height * 0.48
+      ? height * 0.58
       : family === "bell-nozzle"
-        ? height * 0.56
-        : height * 0.52;
+        ? height * 0.62
+        : height * 0.6;
 
   const scale = Math.min(widthFit / modelWidth, heightFit / modelHeight);
 
   return {
     centerX: width / 2,
-    centerY: height * 0.48,
+    centerY: height * 0.5,
     scale,
     maxDepth
   };
@@ -434,7 +475,7 @@ function projectVertex(
   const [x, y, z] = vertex;
 
   const depthRatio = z / Math.max(projection.maxDepth, 1);
-  const perspective = 1 / Math.max(1 + depthRatio * 0.08, 0.82);
+  const perspective = 1 / Math.max(1 + depthRatio * 0.09, 0.78);
 
   return [
     projection.centerX + x * projection.scale * perspective,
@@ -446,63 +487,252 @@ function drawMeshWireframe(
   context: CanvasRenderingContext2D,
   mesh: MeshModel,
   projected: Array<[number, number]>,
-  ratio: number
+  ratio: number,
+  renderMeshActive: boolean
 ) {
   context.save();
-  context.strokeStyle = "rgba(0,0,0,0.38)";
-  context.lineWidth = 0.75 * ratio;
+  context.strokeStyle = renderMeshActive ? "rgba(0,0,0,0.68)" : "rgba(0,0,0,0.38)";
+  context.lineWidth = renderMeshActive ? 0.72 * ratio : 0.75 * ratio;
+
+  const drawnEdges = new Set<string>();
 
   for (const face of mesh.faces) {
-    const points = face.indices.map((index) => projected[index]);
-    if (points.length < 3) continue;
+    for (let index = 0; index < face.indices.length; index += 1) {
+      const a = face.indices[index];
+      const b = face.indices[(index + 1) % face.indices.length];
+      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
 
-    context.beginPath();
-    context.moveTo(points[0][0], points[0][1]);
+      if (drawnEdges.has(key)) continue;
+      drawnEdges.add(key);
 
-    for (let index = 1; index < points.length; index += 1) {
-      context.lineTo(points[index][0], points[index][1]);
+      const start = projected[a];
+      const end = projected[b];
+
+      if (!start || !end) continue;
+
+      context.beginPath();
+      context.moveTo(start[0], start[1]);
+      context.lineTo(end[0], end[1]);
+      context.stroke();
     }
-
-    context.closePath();
-    context.stroke();
   }
 
   context.restore();
 }
 
-function drawMeshStressOverlay(
+function drawMeshNodes(
   context: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  family: VisualFamily,
-  status: string,
+  projected: Array<[number, number]>,
+  ratio: number,
+  renderMeshActive: boolean
+) {
+  if (!renderMeshActive || projected.length > 1800) return;
+
+  context.save();
+  context.fillStyle = "rgba(0,0,0,0.32)";
+
+  const step = Math.max(1, Math.floor(projected.length / 260));
+
+  for (let index = 0; index < projected.length; index += step) {
+    const point = projected[index];
+    context.beginPath();
+    context.arc(point[0], point[1], 1.1 * ratio, 0, Math.PI * 2);
+    context.fill();
+  }
+
+  context.restore();
+}
+
+function drawStressHotspots(
+  context: CanvasRenderingContext2D,
+  faces: Array<{
+    points: Array<[number, number]>;
+    stress: number;
+  }>,
   ratio: number
 ) {
   context.save();
 
-  const isFlowFamily = family === "bell-nozzle" || family === "grid-fin" || family === "nosecone";
+  const sorted = [...faces]
+    .filter((face) => face.stress > 0.62)
+    .sort((a, b) => b.stress - a.stress)
+    .slice(0, 14);
 
-  context.globalAlpha = status === "running" ? 0.92 : 0.64;
-  context.strokeStyle = isFlowFamily ? "rgba(60, 105, 150, 0.52)" : "rgba(160, 82, 35, 0.5)";
-  context.lineWidth = 2 * ratio;
-  context.setLineDash([10 * ratio, 8 * ratio]);
+  for (const face of sorted) {
+    const center = face.points.reduce(
+      (sum, point) => [sum[0] + point[0], sum[1] + point[1]] as [number, number],
+      [0, 0]
+    );
 
-  for (let index = 0; index < 5; index += 1) {
-    const y = height * (0.27 + index * 0.095);
+    center[0] /= face.points.length;
+    center[1] /= face.points.length;
+
+    const radius = (3 + face.stress * 8) * ratio;
+    const gradient = context.createRadialGradient(center[0], center[1], 0, center[0], center[1], radius);
+
+    gradient.addColorStop(0, `rgba(190, 75, 32, ${0.34 + face.stress * 0.26})`);
+    gradient.addColorStop(1, "rgba(190, 75, 32, 0)");
+
+    context.fillStyle = gradient;
     context.beginPath();
-
-    if (isFlowFamily) {
-      context.moveTo(width * 0.12, y);
-      context.bezierCurveTo(width * 0.34, y - 16 * ratio, width * 0.62, y + 18 * ratio, width * 0.9, y);
-    } else {
-      context.moveTo(width * 0.28, y);
-      context.lineTo(width * 0.72, y - 28 * ratio);
-    }
-
-    context.stroke();
+    context.arc(center[0], center[1], radius, 0, Math.PI * 2);
+    context.fill();
   }
 
   context.restore();
+}
+
+function drawStressLegend(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  ratio: number,
+  status: string
+) {
+  const x = width - 170 * ratio;
+  const y = height - 86 * ratio;
+  const barWidth = 118 * ratio;
+  const barHeight = 9 * ratio;
+
+  context.save();
+  context.globalAlpha = 0.92;
+  context.fillStyle = "rgba(255,255,255,0.78)";
+  context.strokeStyle = "rgba(0,0,0,0.16)";
+  context.lineWidth = 1 * ratio;
+  context.fillRect(x - 12 * ratio, y - 22 * ratio, 150 * ratio, 58 * ratio);
+  context.strokeRect(x - 12 * ratio, y - 22 * ratio, 150 * ratio, 58 * ratio);
+
+  const gradient = context.createLinearGradient(x, y, x + barWidth, y);
+  gradient.addColorStop(0, "rgba(68, 112, 150, 0.95)");
+  gradient.addColorStop(0.5, "rgba(190, 165, 78, 0.95)");
+  gradient.addColorStop(1, "rgba(190, 75, 32, 0.95)");
+
+  context.fillStyle = gradient;
+  context.fillRect(x, y, barWidth, barHeight);
+
+  context.strokeStyle = "rgba(0,0,0,0.28)";
+  context.strokeRect(x, y, barWidth, barHeight);
+
+  context.fillStyle = "rgba(84,96,112,0.95)";
+  context.font = `${10 * ratio}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+  context.fillText(status === "running" ? "LIVE STRESS EST." : "STRESS ESTIMATE", x, y - 7 * ratio);
+  context.fillText("LOW", x, y + 24 * ratio);
+  context.fillText("HIGH", x + barWidth - 27 * ratio, y + 24 * ratio);
+
+  context.restore();
+}
+
+function drawMeshOriginMarker(
+  context: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  ratio: number
+) {
+  context.save();
+  context.strokeStyle = "rgba(0,0,0,0.18)";
+  context.lineWidth = 1 * ratio;
+  context.beginPath();
+  context.moveTo(centerX - 16 * ratio, centerY);
+  context.lineTo(centerX + 16 * ratio, centerY);
+  context.moveTo(centerX, centerY - 16 * ratio);
+  context.lineTo(centerX, centerY + 16 * ratio);
+  context.stroke();
+  context.restore();
+}
+
+function estimateFaceStress(centroid: Vec3, geometry: SafeGeometry, family: VisualFamily) {
+  const width = Math.max(getDimension(geometry, "widthMm", 120), 1);
+  const height = Math.max(getDimension(geometry, "heightMm", 90), 1);
+  const depth = Math.max(getDimension(geometry, "depthMm", 50), 1);
+
+  const nx = clamp(Math.abs(centroid[0]) / (width / 2), 0, 1);
+  const ny = clamp(Math.abs(centroid[1]) / (height / 2), 0, 1);
+  const nz = clamp(Math.abs(centroid[2]) / (depth / 2), 0, 1);
+
+  if (family === "bell-nozzle" || family === "nosecone" || family === "grid-fin") {
+    return clamp(0.2 + nz * 0.45 + ny * 0.25, 0, 1);
+  }
+
+  const derived = getDerivedParameters(geometry);
+  const load = numberFrom(derived.requiredLoadN) ?? numberFrom(geometry.derived?.requiredLoadN) ?? 2500;
+  const loadFactor = clamp(load / 5000, 0.15, 1);
+
+  return clamp(0.16 + ny * 0.38 + nx * 0.22 + nz * 0.14 + loadFactor * 0.18, 0, 1);
+}
+
+function getStressFill(value: number, facing: number) {
+  const normalized = clamp(value, 0, 1);
+  const light = clamp(0.72 + Math.max(facing, 0) * 0.18, 0.58, 0.94);
+
+  const low: [number, number, number] = [78, 116, 148];
+  const mid: [number, number, number] = [184, 160, 78];
+  const high: [number, number, number] = [190, 78, 36];
+
+  const rgb = normalized < 0.5
+    ? mixColor(low, mid, normalized / 0.5)
+    : mixColor(mid, high, (normalized - 0.5) / 0.5);
+
+  return `rgba(${Math.floor(rgb[0] * light)}, ${Math.floor(rgb[1] * light)}, ${Math.floor(
+    rgb[2] * light
+  )}, 0.94)`;
+}
+
+function getStressStroke(value: number) {
+  const normalized = clamp(value, 0, 1);
+  return normalized > 0.72 ? "rgba(90, 36, 24, 0.58)" : "rgba(0,0,0,0.22)";
+}
+
+function getFaceNormal(a: Vec3, b: Vec3, c: Vec3): Vec3 {
+  const ux = b[0] - a[0];
+  const uy = b[1] - a[1];
+  const uz = b[2] - a[2];
+
+  const vx = c[0] - a[0];
+  const vy = c[1] - a[1];
+  const vz = c[2] - a[2];
+
+  return normalizeVector([
+    uy * vz - uz * vy,
+    uz * vx - ux * vz,
+    ux * vy - uy * vx
+  ]);
+}
+
+function getFaceCentroid(vertices: Vec3[]): Vec3 {
+  const sum = vertices.reduce(
+    (current, vertex) => [
+      current[0] + vertex[0],
+      current[1] + vertex[1],
+      current[2] + vertex[2]
+    ] as Vec3,
+    [0, 0, 0]
+  );
+
+  return [
+    sum[0] / vertices.length,
+    sum[1] / vertices.length,
+    sum[2] / vertices.length
+  ];
+}
+
+function normalizeVector(vector: Vec3): Vec3 {
+  const length = Math.hypot(vector[0], vector[1], vector[2]) || 1;
+
+  return [vector[0] / length, vector[1] / length, vector[2] / length];
+}
+
+function dot(a: Vec3, b: Vec3) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+function mixColor(a: [number, number, number], b: [number, number, number], t: number): [number, number, number] {
+  const clamped = clamp(t, 0, 1);
+
+  return [
+    a[0] + (b[0] - a[0]) * clamped,
+    a[1] + (b[1] - a[1]) * clamped,
+    a[2] + (b[2] - a[2]) * clamped
+  ];
 }
 
 function buildMeshForFamily(geometry: SafeGeometry, family: VisualFamily): MeshModel {
@@ -539,45 +769,7 @@ function getRenderableMesh(geometry?: SafeGeometry): MeshModel | undefined {
   if (!renderMesh) return undefined;
 
   const vertices = renderMesh.vertices.map(normalizeRenderableVertex);
-function normalizeRenderableFace(face: unknown, vertexCount: number): MeshFace | undefined {
-  if (Array.isArray(face)) {
-    if (face.length < 3) return undefined;
 
-    const indices = face.filter((index) => Number.isInteger(index)) as number[];
-
-    if (indices.length < 3) return undefined;
-
-    const valid = indices.every((index) => index >= 0 && index < vertexCount);
-
-    if (!valid) return undefined;
-
-    return {
-      indices,
-      shade: 0.74
-    };
-  }
-
-  if (!face || typeof face !== "object") return undefined;
-
-  const faceObject = face as Record<string, unknown>;
-  const rawIndices = faceObject.indices;
-
-  if (!Array.isArray(rawIndices)) return undefined;
-  if (rawIndices.length < 3) return undefined;
-
-  const indices = rawIndices.filter((index) => Number.isInteger(index)) as number[];
-
-  if (indices.length < 3) return undefined;
-
-  const valid = indices.every((index) => index >= 0 && index < vertexCount);
-
-  if (!valid) return undefined;
-
-  return {
-    indices,
-    shade: typeof faceObject.shade === "number" ? faceObject.shade : 0.74
-  };
-}
   const faces = renderMesh.faces
     .map((face) => normalizeRenderableFace(face, vertices.length))
     .filter((face): face is MeshFace => Boolean(face));
@@ -618,6 +810,39 @@ function normalizeRenderableVertex(vertex: unknown): Vec3 {
   }
 
   return [0, 0, 0];
+}
+
+function normalizeRenderableFace(face: unknown, vertexCount: number): MeshFace | undefined {
+  if (Array.isArray(face)) {
+    if (face.length < 3) return undefined;
+
+    const indices = face.filter((index) => Number.isInteger(index)) as number[];
+
+    if (indices.length < 3) return undefined;
+    if (!indices.every((index) => index >= 0 && index < vertexCount)) return undefined;
+
+    return {
+      indices,
+      shade: 0.74
+    };
+  }
+
+  if (!face || typeof face !== "object") return undefined;
+
+  const faceObject = face as Record<string, unknown>;
+  const rawIndices = faceObject.indices;
+
+  if (!Array.isArray(rawIndices)) return undefined;
+
+  const indices = rawIndices.filter((index) => Number.isInteger(index)) as number[];
+
+  if (indices.length < 3) return undefined;
+  if (!indices.every((index) => index >= 0 && index < vertexCount)) return undefined;
+
+  return {
+    indices,
+    shade: typeof faceObject.shade === "number" ? faceObject.shade : 0.74
+  };
 }
 
 function buildStructuralBracketMesh(geometry: SafeGeometry): MeshModel {
