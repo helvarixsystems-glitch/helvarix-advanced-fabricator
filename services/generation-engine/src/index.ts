@@ -500,6 +500,39 @@ function buildStructuralRenderMesh(
   candidate: CandidateGeometry,
   requirements: StructuralBracketRequirements
 ): RenderableMesh {
+  return buildTopologyOptimizedStructuralMesh(candidate, requirements);
+}
+
+type TopologyCell = {
+  column: number;
+  row: number;
+  x: number;
+  y: number;
+  density: number;
+  stress: number;
+  group: string;
+};
+
+type TopologyField = {
+  columns: number;
+  rows: number;
+  cellWidth: number;
+  cellHeight: number;
+  occupied: boolean[][];
+  cells: TopologyCell[];
+  boltPositions: Array<[number, number]>;
+  boltHoleRadius: number;
+  boltPadRadius: number;
+  loadPoints: Array<[number, number]>;
+  targetOpenAreaPercent: number;
+  actualOpenAreaPercent: number;
+  threshold: number;
+};
+
+function buildTopologyOptimizedStructuralMesh(
+  candidate: CandidateGeometry,
+  requirements: StructuralBracketRequirements
+): RenderableMesh {
   const mesh = createMeshBuilder();
 
   const width = candidate.widthMm;
@@ -507,157 +540,59 @@ function buildStructuralRenderMesh(
   const depth = candidate.depthMm;
   const wall = candidate.wallThicknessMm;
 
-  const ribCount = numberParam(candidate, "ribCount", 4);
-  const gussetCount = numberParam(candidate, "gussetCount", 4);
-  const diagonalWebCount = numberParam(candidate, "diagonalWebCount", 6);
-  const lighteningHoleCount = numberParam(candidate, "lighteningHoleCount", 6);
-  const lighteningHoleDiameterMm = numberParam(
-    candidate,
-    "lighteningHoleDiameterMm",
-    wall * 3.25
-  );
-
   const boltCount = clamp(Math.round(requirements.mounting.boltCount), 1, 12);
   const boltDiameterMm = Math.max(requirements.mounting.boltDiameterMm, wall * 0.9);
-
-  const railHeight = Math.max(wall * 2.6, height * 0.13);
-  const sideRailWidth = Math.max(wall * 2.2, width * 0.08);
-  const ribWidth = Math.max(wall * 1.25, width * 0.04);
-  const frontSkinZ = depth / 2;
-
+  const railHeight = Math.max(wall * 2.35, height * 0.12);
   const boltPositions = buildBoltPositions(width, height, railHeight, boltCount);
-  const lighteningPositions = candidate.skeletonized
-    ? buildLighteningHolePositions(width, height, railHeight, lighteningHoleCount)
-    : [];
 
-  const holes: PlanarHole[] = [
-    ...boltPositions.map((center, index) => ({
-      id: `bolt-hole-${index + 1}`,
-      type: "bolt-hole" as const,
-      x: center[0],
-      y: center[1],
-      radius: Math.max(boltDiameterMm * 0.56, wall * 0.75)
-    })),
-    ...lighteningPositions.map((center, index) => ({
-      id: `lightening-hole-${index + 1}`,
-      type: "lightening-hole" as const,
-      x: center[0],
-      y: center[1],
-      radius: Math.max(lighteningHoleDiameterMm / 2, wall * 1.1)
-    }))
-  ];
+  const field = buildTopologyField({
+    width,
+    height,
+    wall,
+    boltPositions,
+    boltDiameterMm,
+    candidate,
+    requirements
+  });
 
-  addPerforatedPlateFeature(mesh, {
-    id: "primary-cut-plate",
+  for (const cell of field.cells) {
+    addTopologyCell(mesh, {
+      id: `topology-cell-${cell.column}-${cell.row}`,
+      group: cell.group,
+      center: [cell.x, cell.y, 0],
+      size: [field.cellWidth * 1.04, field.cellHeight * 1.04, depth],
+      density: cell.density,
+      stress: cell.stress
+    });
+  }
+
+  addPerimeterSkin(mesh, {
     width,
     height,
     depth,
-    holes,
-    cellsX: Math.max(28, Math.min(54, Math.round(width / Math.max(wall * 0.62, 2.2)))),
-    cellsY: Math.max(20, Math.min(42, Math.round(height / Math.max(wall * 0.62, 2.2)))),
-    shade: 0.7
+    wall,
+    field
   });
 
-  addBoxFeature(mesh, {
-    id: "left-integral-side-rail",
-    group: "rib",
-    min: [-width / 2, -height / 2, frontSkinZ],
-    max: [-width / 2 + sideRailWidth, height / 2, frontSkinZ + wall * 0.72],
-    shade: 0.58
+  addBoltHoleWallFeatures(mesh, {
+    boltPositions,
+    boltDiameterMm,
+    depth,
+    wall
   });
 
-  addBoxFeature(mesh, {
-    id: "right-integral-side-rail",
-    group: "rib",
-    min: [width / 2 - sideRailWidth, -height / 2, frontSkinZ],
-    max: [width / 2, height / 2, frontSkinZ + wall * 0.72],
-    shade: 0.6
+  addLoadInterfaceFeatures(mesh, {
+    width,
+    height,
+    depth,
+    wall,
+    requirements
   });
 
-  const usableHeight = height - railHeight * 2.35;
-  const ribSlots = Math.max(1, Math.min(9, ribCount));
-
-  for (let index = 0; index < ribSlots; index += 1) {
-    const x = lerp(-width * 0.33, width * 0.33, ribSlots === 1 ? 0.5 : index / (ribSlots - 1));
-
-    addBoxFeature(mesh, {
-      id: `front-load-rib-${index + 1}`,
-      group: "rib",
-      min: [x - ribWidth / 2, -usableHeight / 2, frontSkinZ + wall * 0.08],
-      max: [x + ribWidth / 2, usableHeight / 2, frontSkinZ + wall * 1.35],
-      shade: 0.66 + index * 0.012
-    });
-  }
-
-  const gussetSlots = Math.max(0, Math.min(10, gussetCount));
-
-  for (let index = 0; index < gussetSlots; index += 1) {
-    const side = index % 2 === 0 ? -1 : 1;
-    const y = lerp(
-      -height * 0.32,
-      height * 0.32,
-      gussetSlots <= 2 ? 0.5 : Math.floor(index / 2) / Math.max(Math.ceil(gussetSlots / 2) - 1, 1)
-    );
-
-    addOrientedWebFeature(mesh, {
-      id: `triangulated-gusset-${index + 1}`,
-      group: "gusset",
-      start: [side * width * 0.39, y - wall * 0.6, frontSkinZ + wall * 0.2],
-      end: [side * width * 0.18, y + height * 0.13, frontSkinZ + wall * 1.1],
-      thickness: Math.max(wall * 1.05, 4),
-      depth: Math.max(wall * 0.7, 3.2),
-      shade: 0.63
-    });
-  }
-
-  if (candidate.skeletonized) {
-    const webSlots = Math.max(0, Math.min(12, diagonalWebCount));
-
-    for (let index = 0; index < webSlots; index += 1) {
-      const y = lerp(
-        -height * 0.27,
-        height * 0.27,
-        webSlots === 1 ? 0.5 : index / Math.max(webSlots - 1, 1)
-      );
-
-      const tilt = index % 2 === 0 ? 1 : -1;
-
-      addOrientedWebFeature(mesh, {
-        id: `diagonal-load-web-${index + 1}`,
-        group: "diagonal-web",
-        start: [-width * 0.34, y - wall * 0.25, frontSkinZ + wall * 0.15],
-        end: [width * 0.34, y + tilt * height * 0.12, frontSkinZ + wall * 0.98],
-        thickness: Math.max(wall * 0.7, 3.2),
-        depth: Math.max(wall * 0.52, 2.8),
-        shade: 0.55
-      });
-    }
-  } else {
-    addBoxFeature(mesh, {
-      id: "solid-center-web",
-      group: "rib",
-      min: [-width * 0.28, -height * 0.22, frontSkinZ + wall * 0.1],
-      max: [width * 0.28, height * 0.22, frontSkinZ + wall * 1.05],
-      shade: 0.56
-    });
-  }
-
-  holes.forEach((hole) => {
-    const rimOuterRadius = hole.type === "bolt-hole" ? hole.radius * 1.42 : hole.radius * 1.18;
-    const rimInnerRadius = hole.radius * 1.03;
-
-    addCylinderFeature(mesh, {
-      id: `${hole.id}-raised-rim`,
-      type: hole.type,
-      center: [hole.x, hole.y, frontSkinZ + wall * 0.48],
-      radius: rimOuterRadius,
-      innerRadius: rimInnerRadius,
-      height: hole.type === "bolt-hole" ? wall * 0.72 : wall * 0.48,
-      segments: hole.type === "bolt-hole" ? 28 : 24,
-      group: hole.type,
-      shade: hole.type === "bolt-hole" ? 0.84 : 0.76
-    });
-  });
+  const actualOpenAreaPercent = roundTo(field.actualOpenAreaPercent, 0.1);
+  const ribCount = numberParam(candidate, "ribCount", 4);
+  const gussetCount = numberParam(candidate, "gussetCount", 4);
+  const diagonalWebCount = numberParam(candidate, "diagonalWebCount", 6);
 
   const renderMesh: RenderableMesh = {
     version: "haf-render-mesh-v1",
@@ -675,15 +610,687 @@ function buildStructuralRenderMesh(
       candidateId: candidate.id,
       source: "generation-engine",
       boltCount,
-      lighteningHoleCount: candidate.skeletonized ? lighteningPositions.length : 0,
+      lighteningHoleCount: field.cells.length,
       ribCount,
       gussetCount,
       diagonalWebCount,
-      skeletonized: candidate.skeletonized
+      skeletonized: true
     }
   };
 
+  candidate.derivedParameters.topologyCells = field.cells.length;
+  candidate.derivedParameters.topologyGridColumns = field.columns;
+  candidate.derivedParameters.topologyGridRows = field.rows;
+  candidate.derivedParameters.topologyOpenAreaPercent = actualOpenAreaPercent;
+  candidate.derivedParameters.topologyThreshold = roundTo(field.threshold, 0.001);
+  candidate.derivedParameters.topologyMode = "density-field-load-path";
+
   return renderMesh;
+}
+
+function buildTopologyField(args: {
+  width: number;
+  height: number;
+  wall: number;
+  boltPositions: Array<[number, number]>;
+  boltDiameterMm: number;
+  candidate: CandidateGeometry;
+  requirements: StructuralBracketRequirements;
+}): TopologyField {
+  const { width, height, wall, boltPositions, boltDiameterMm, candidate, requirements } = args;
+
+  const targetOpenAreaPercent = clamp(
+    requirements.objectives.targetOpenAreaPercent ?? candidate.openAreaPercent ?? 34,
+    18,
+    62
+  );
+
+  const columns = clamp(Math.round(width / 2.4), 34, 76);
+  const rows = clamp(Math.round(height / 2.4), 26, 58);
+  const cellWidth = width / columns;
+  const cellHeight = height / rows;
+
+  const boltHoleRadius = Math.max(boltDiameterMm * 0.52, wall * 0.55);
+  const boltPadRadius = Math.max(boltDiameterMm * 1.85, wall * 2.45);
+  const edgeBand = Math.max(wall * 1.05, Math.min(width, height) * 0.035);
+  const topLoadY = height / 2 - edgeBand * 1.1;
+
+  const loadSpread = requirements.loadCase.direction === "lateral" ? width * 0.34 : width * 0.22;
+  const loadPoints: Array<[number, number]> = requirements.loadCase.direction === "lateral"
+    ? [[width * 0.38, height * 0.18], [width * 0.38, -height * 0.18]]
+    : requirements.loadCase.direction === "multi-axis"
+      ? [[0, topLoadY], [-loadSpread, topLoadY - height * 0.08], [loadSpread, topLoadY - height * 0.08]]
+      : [[0, topLoadY], [-loadSpread, topLoadY], [loadSpread, topLoadY]];
+
+  const samples: Array<{
+    column: number;
+    row: number;
+    x: number;
+    y: number;
+    density: number;
+    stress: number;
+    group: string;
+    hardKeep: boolean;
+    isVoid: boolean;
+  }> = [];
+
+  for (let row = 0; row < rows; row += 1) {
+    const y = -height / 2 + (row + 0.5) * cellHeight;
+
+    for (let column = 0; column < columns; column += 1) {
+      const x = -width / 2 + (column + 0.5) * cellWidth;
+      const field = evaluateTopologyDensity({
+        x,
+        y,
+        width,
+        height,
+        wall,
+        edgeBand,
+        boltPositions,
+        boltHoleRadius,
+        boltPadRadius,
+        loadPoints,
+        requirements,
+        candidate
+      });
+
+      samples.push({ column, row, x, y, ...field });
+    }
+  }
+
+  const sorted = samples
+    .filter((sample) => !sample.isVoid && !sample.hardKeep)
+    .map((sample) => sample.density)
+    .sort((a, b) => a - b);
+
+  const removalFraction = targetOpenAreaPercent / 100;
+  const thresholdIndex = clamp(Math.floor(sorted.length * removalFraction), 0, Math.max(sorted.length - 1, 0));
+  const threshold = sorted[thresholdIndex] ?? 0.28;
+
+  const occupied = Array.from({ length: rows }, () => Array.from({ length: columns }, () => false));
+  const cells: TopologyCell[] = [];
+
+  for (const sample of samples) {
+    const keep = !sample.isVoid && (sample.hardKeep || sample.density >= threshold);
+    occupied[sample.row][sample.column] = keep;
+
+    if (keep) {
+      cells.push({
+        column: sample.column,
+        row: sample.row,
+        x: sample.x,
+        y: sample.y,
+        density: sample.density,
+        stress: sample.stress,
+        group: sample.group
+      });
+    }
+  }
+
+  reinforceConnectivity({
+    occupied,
+    samples,
+    columns,
+    rows,
+    width,
+    height,
+    boltPositions,
+    loadPoints
+  });
+
+  const finalCells: TopologyCell[] = [];
+
+  for (const sample of samples) {
+    if (!occupied[sample.row][sample.column]) continue;
+
+    finalCells.push({
+      column: sample.column,
+      row: sample.row,
+      x: sample.x,
+      y: sample.y,
+      density: sample.density,
+      stress: sample.stress,
+      group: sample.group
+    });
+  }
+
+  const totalCells = columns * rows;
+  const actualOpenAreaPercent = totalCells > 0
+    ? ((totalCells - finalCells.length) / totalCells) * 100
+    : 0;
+
+  return {
+    columns,
+    rows,
+    cellWidth,
+    cellHeight,
+    occupied,
+    cells: finalCells,
+    boltPositions,
+    boltHoleRadius,
+    boltPadRadius,
+    loadPoints,
+    targetOpenAreaPercent,
+    actualOpenAreaPercent,
+    threshold
+  };
+}
+
+function evaluateTopologyDensity(args: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  wall: number;
+  edgeBand: number;
+  boltPositions: Array<[number, number]>;
+  boltHoleRadius: number;
+  boltPadRadius: number;
+  loadPoints: Array<[number, number]>;
+  requirements: StructuralBracketRequirements;
+  candidate: CandidateGeometry;
+}): {
+  density: number;
+  stress: number;
+  group: string;
+  hardKeep: boolean;
+  isVoid: boolean;
+} {
+  const {
+    x,
+    y,
+    width,
+    height,
+    wall,
+    edgeBand,
+    boltPositions,
+    boltHoleRadius,
+    boltPadRadius,
+    loadPoints,
+    requirements,
+    candidate
+  } = args;
+
+  const distanceToOuterEdge = Math.min(
+    x + width / 2,
+    width / 2 - x,
+    y + height / 2,
+    height / 2 - y
+  );
+
+  const insideBoltVoid = boltPositions.some(([bx, by]) => distance2d(x, y, bx, by) < boltHoleRadius);
+
+  if (insideBoltVoid) {
+    return {
+      density: 0,
+      stress: 0,
+      group: "through-hole-void",
+      hardKeep: false,
+      isVoid: true
+    };
+  }
+
+  let density = 0;
+  let stress = 0;
+  let group = "topology-web";
+  let hardKeep = false;
+
+  const edgeDensity = smoothBand(distanceToOuterEdge, edgeBand * 0.15, edgeBand * 1.25);
+
+  if (edgeDensity > 0.12) {
+    density = Math.max(density, 0.36 + edgeDensity * 0.44);
+    group = "perimeter-load-frame";
+  }
+
+  for (const [bx, by] of boltPositions) {
+    const distanceToBolt = distance2d(x, y, bx, by);
+    const padDensity = annularBand(distanceToBolt, boltHoleRadius, boltPadRadius);
+
+    if (padDensity > 0.03) {
+      density = Math.max(density, 0.48 + padDensity * 0.5);
+      stress = Math.max(stress, 0.58 + padDensity * 0.34);
+      group = "bolt-load-pad";
+    }
+
+    if (distanceToBolt < boltPadRadius * 1.08) {
+      hardKeep = true;
+    }
+  }
+
+  for (const loadPoint of loadPoints) {
+    const distanceToLoad = distance2d(x, y, loadPoint[0], loadPoint[1]);
+    const loadPadDensity = gaussian(distanceToLoad, Math.max(wall * 3.2, width * 0.055));
+
+    if (loadPadDensity > 0.05) {
+      density = Math.max(density, 0.42 + loadPadDensity * 0.48);
+      stress = Math.max(stress, 0.62 + loadPadDensity * 0.3);
+      group = "load-interface";
+    }
+  }
+
+  const pathWidth = Math.max(wall * 1.75, Math.min(width, height) * 0.045);
+  const secondaryPathWidth = Math.max(wall * 1.15, Math.min(width, height) * 0.032);
+
+  for (const bolt of boltPositions) {
+    for (const loadPoint of loadPoints) {
+      const distanceToPath = distancePointToSegment(x, y, bolt[0], bolt[1], loadPoint[0], loadPoint[1]);
+      const loadPathDensity = gaussian(distanceToPath, pathWidth);
+
+      if (loadPathDensity > 0.035) {
+        const pathStress = loadPathDensity * pathLoadBias(x, y, bolt, loadPoint, requirements.loadCase.direction);
+        density = Math.max(density, 0.2 + loadPathDensity * 0.8);
+        stress = Math.max(stress, pathStress);
+        group = "primary-load-path";
+      }
+    }
+  }
+
+  const diagonalWebCount = numberParam(candidate, "diagonalWebCount", 6);
+  const webInfluence = clamp(diagonalWebCount / 10, 0.2, 1.1);
+
+  if (boltPositions.length >= 2) {
+    for (let index = 0; index < boltPositions.length - 1; index += 1) {
+      const a = boltPositions[index];
+      const b = boltPositions[index + 1];
+
+      for (const loadPoint of loadPoints) {
+        const midX = (a[0] + b[0] + loadPoint[0]) / 3;
+        const midY = (a[1] + b[1] + loadPoint[1]) / 3;
+        const d1 = distancePointToSegment(x, y, a[0], a[1], midX, midY);
+        const d2 = distancePointToSegment(x, y, b[0], b[1], midX, midY);
+        const d3 = distancePointToSegment(x, y, midX, midY, loadPoint[0], loadPoint[1]);
+        const trussDensity = Math.max(
+          gaussian(d1, secondaryPathWidth),
+          gaussian(d2, secondaryPathWidth),
+          gaussian(d3, secondaryPathWidth)
+        ) * webInfluence;
+
+        if (trussDensity > 0.04) {
+          density = Math.max(density, 0.16 + trussDensity * 0.68);
+          stress = Math.max(stress, trussDensity * 0.78);
+          group = "branching-truss-web";
+        }
+      }
+    }
+  }
+
+  const vibrationHz = requirements.loadCase.vibrationHz ?? 0;
+  const vibrationBrace = vibrationHz > 0
+    ? Math.max(
+        gaussian(Math.abs(y), Math.max(wall * 2.4, height * 0.055)),
+        gaussian(Math.abs(x), Math.max(wall * 2.2, width * 0.045)) * 0.65
+      ) * clamp(vibrationHz / 150, 0.1, 1)
+    : 0;
+
+  if (vibrationBrace > 0.08) {
+    density = Math.max(density, 0.16 + vibrationBrace * 0.44);
+    stress = Math.max(stress, vibrationBrace * 0.45);
+    group = "vibration-stabilizer";
+  }
+
+  const materialNoise = deterministicNoise(x, y, candidate.id) * 0.075;
+  density = clamp(density + materialNoise, 0, 1.4);
+  stress = clamp(stress + density * 0.18, 0, 1.25);
+
+  return {
+    density,
+    stress,
+    group,
+    hardKeep,
+    isVoid: false
+  };
+}
+
+function reinforceConnectivity(args: {
+  occupied: boolean[][];
+  samples: Array<{
+    column: number;
+    row: number;
+    x: number;
+    y: number;
+    density: number;
+    stress: number;
+    group: string;
+    hardKeep: boolean;
+    isVoid: boolean;
+  }>;
+  columns: number;
+  rows: number;
+  width: number;
+  height: number;
+  boltPositions: Array<[number, number]>;
+  loadPoints: Array<[number, number]>;
+}) {
+  const { occupied, samples, columns, rows, width, height, boltPositions, loadPoints } = args;
+
+  const sampleMap = new Map<string, (typeof samples)[number]>();
+  for (const sample of samples) {
+    sampleMap.set(`${sample.column}:${sample.row}`, sample);
+  }
+
+  const toGrid = (point: [number, number]) => ({
+    column: clamp(Math.floor(((point[0] + width / 2) / width) * columns), 0, columns - 1),
+    row: clamp(Math.floor(((point[1] + height / 2) / height) * rows), 0, rows - 1)
+  });
+
+  const drawGridLine = (from: [number, number], to: [number, number], radiusCells: number) => {
+    const a = toGrid(from);
+    const b = toGrid(to);
+    const steps = Math.max(Math.abs(b.column - a.column), Math.abs(b.row - a.row), 1);
+
+    for (let step = 0; step <= steps; step += 1) {
+      const t = step / steps;
+      const column = Math.round(lerp(a.column, b.column, t));
+      const row = Math.round(lerp(a.row, b.row, t));
+
+      for (let dy = -radiusCells; dy <= radiusCells; dy += 1) {
+        for (let dx = -radiusCells; dx <= radiusCells; dx += 1) {
+          if (dx * dx + dy * dy > radiusCells * radiusCells) continue;
+          const c = column + dx;
+          const r = row + dy;
+          if (c < 0 || c >= columns || r < 0 || r >= rows) continue;
+          const sample = sampleMap.get(`${c}:${r}`);
+          if (sample?.isVoid) continue;
+          occupied[r][c] = true;
+        }
+      }
+    }
+  };
+
+  for (const bolt of boltPositions) {
+    for (const loadPoint of loadPoints) {
+      drawGridLine(bolt, loadPoint, 1);
+    }
+  }
+
+  if (boltPositions.length > 1) {
+    for (let index = 0; index < boltPositions.length - 1; index += 1) {
+      drawGridLine(boltPositions[index], boltPositions[index + 1], 1);
+    }
+  }
+}
+
+function addTopologyCell(
+  mesh: MeshBuilder,
+  options: {
+    id: string;
+    group: string;
+    center: Vec3;
+    size: Vec3;
+    density: number;
+    stress: number;
+  }
+) {
+  const [cx, cy, cz] = options.center;
+  const [sx, sy, sz] = options.size;
+  const min: Vec3 = [cx - sx / 2, cy - sy / 2, cz - sz / 2];
+  const max: Vec3 = [cx + sx / 2, cy + sy / 2, cz + sz / 2];
+  const start = mesh.vertices.length;
+  const shade = clamp(0.38 + options.density * 0.42 + options.stress * 0.16, 0.34, 1.08);
+
+  mesh.vertices.push(
+    [min[0], min[1], min[2]],
+    [max[0], min[1], min[2]],
+    [max[0], max[1], min[2]],
+    [min[0], max[1], min[2]],
+    [min[0], min[1], max[2]],
+    [max[0], min[1], max[2]],
+    [max[0], max[1], max[2]],
+    [min[0], max[1], max[2]]
+  );
+
+  mesh.faces.push(
+    { indices: [start + 0, start + 1, start + 2, start + 3], group: options.group, shade: shade * 0.74 },
+    { indices: [start + 4, start + 7, start + 6, start + 5], group: options.group, shade: shade * 1.08 },
+    { indices: [start + 0, start + 4, start + 5, start + 1], group: options.group, shade: shade * 0.92 },
+    { indices: [start + 1, start + 5, start + 6, start + 2], group: options.group, shade: shade * 0.98 },
+    { indices: [start + 2, start + 6, start + 7, start + 3], group: options.group, shade: shade * 1.02 },
+    { indices: [start + 3, start + 7, start + 4, start + 0], group: options.group, shade: shade * 0.84 }
+  );
+}
+
+function addPerimeterSkin(
+  mesh: MeshBuilder,
+  args: {
+    width: number;
+    height: number;
+    depth: number;
+    wall: number;
+    field: TopologyField;
+  }
+) {
+  const { width, height, depth, wall, field } = args;
+  const skinThickness = Math.max(wall * 0.8, Math.min(width, height) * 0.026);
+  const shade = 0.55;
+
+  const bars: Array<{ id: string; min: Vec3; max: Vec3 }> = [
+    {
+      id: "top-load-skin",
+      min: [-width / 2, height / 2 - skinThickness, -depth / 2],
+      max: [width / 2, height / 2, depth / 2]
+    },
+    {
+      id: "bottom-mounting-skin",
+      min: [-width / 2, -height / 2, -depth / 2],
+      max: [width / 2, -height / 2 + skinThickness, depth / 2]
+    },
+    {
+      id: "left-side-skin",
+      min: [-width / 2, -height / 2, -depth / 2],
+      max: [-width / 2 + skinThickness, height / 2, depth / 2]
+    },
+    {
+      id: "right-side-skin",
+      min: [width / 2 - skinThickness, -height / 2, -depth / 2],
+      max: [width / 2, height / 2, depth / 2]
+    }
+  ];
+
+  for (const bar of bars) {
+    addBoxFeature(mesh, {
+      id: bar.id,
+      group: bar.id.includes("top") ? "load-plate" : bar.id.includes("bottom") ? "mounting-plate" : "rib",
+      min: bar.min,
+      max: bar.max,
+      shade
+    });
+  }
+
+  mesh.features.push({
+    type: "load-plate",
+    id: "topology-field",
+    center: [0, 0, 0],
+    size: [width, height, depth],
+    rotationDeg: roundTo(field.threshold * 100, 0.1)
+  });
+}
+
+function addBoltHoleWallFeatures(
+  mesh: MeshBuilder,
+  args: {
+    boltPositions: Array<[number, number]>;
+    boltDiameterMm: number;
+    depth: number;
+    wall: number;
+  }
+) {
+  const { boltPositions, boltDiameterMm, depth, wall } = args;
+  const holeRadius = Math.max(boltDiameterMm * 0.52, wall * 0.55);
+  const wallRadius = Math.max(boltDiameterMm * 1.05, wall * 1.35);
+
+  boltPositions.forEach(([x, y], index) => {
+    addOpenCylinderWall(mesh, {
+      id: `bolt-hole-${index + 1}`,
+      group: "bolt-hole-wall",
+      type: "bolt-hole",
+      center: [x, y, 0],
+      innerRadius: holeRadius,
+      outerRadius: wallRadius,
+      depth,
+      segments: 32,
+      shade: 0.76
+    });
+  });
+}
+
+function addLoadInterfaceFeatures(
+  mesh: MeshBuilder,
+  args: {
+    width: number;
+    height: number;
+    depth: number;
+    wall: number;
+    requirements: StructuralBracketRequirements;
+  }
+) {
+  const { width, height, depth, wall, requirements } = args;
+  const loadPadWidth = requirements.loadCase.direction === "lateral" ? width * 0.24 : width * 0.42;
+  const loadPadHeight = Math.max(wall * 2.2, height * 0.08);
+
+  addBoxFeature(mesh, {
+    id: "derived-load-interface-pad",
+    group: "load-plate",
+    min: [-loadPadWidth / 2, height / 2 - loadPadHeight * 1.25, -depth / 2],
+    max: [loadPadWidth / 2, height / 2 - loadPadHeight * 0.15, depth / 2],
+    shade: 0.82
+  });
+}
+
+function addOpenCylinderWall(
+  mesh: MeshBuilder,
+  options: {
+    id: string;
+    type: "bolt-hole" | "lightening-hole";
+    group: string;
+    center: Vec3;
+    innerRadius: number;
+    outerRadius: number;
+    depth: number;
+    segments: number;
+    shade: number;
+  }
+) {
+  const start = mesh.vertices.length;
+  const z0 = -options.depth / 2;
+  const z1 = options.depth / 2;
+
+  for (const z of [z0, z1]) {
+    for (const radius of [options.outerRadius, options.innerRadius]) {
+      for (let index = 0; index < options.segments; index += 1) {
+        const angle = (Math.PI * 2 * index) / options.segments;
+        mesh.vertices.push([
+          options.center[0] + Math.cos(angle) * radius,
+          options.center[1] + Math.sin(angle) * radius,
+          z
+        ]);
+      }
+    }
+  }
+
+  const backOuter = start;
+  const backInner = start + options.segments;
+  const frontOuter = start + options.segments * 2;
+  const frontInner = start + options.segments * 3;
+
+  for (let index = 0; index < options.segments; index += 1) {
+    const next = (index + 1) % options.segments;
+
+    mesh.faces.push({
+      indices: [backOuter + index, backOuter + next, frontOuter + next, frontOuter + index],
+      group: options.group,
+      shade: options.shade * 0.82
+    });
+
+    mesh.faces.push({
+      indices: [frontOuter + index, frontOuter + next, frontInner + next, frontInner + index],
+      group: options.group,
+      shade: options.shade * 1.12
+    });
+
+    mesh.faces.push({
+      indices: [backInner + index, frontInner + index, frontInner + next, backInner + next],
+      group: options.group,
+      shade: options.shade * 0.42
+    });
+  }
+
+  mesh.features.push({
+    type: options.type,
+    id: options.id,
+    center: options.center,
+    diameterMm: options.innerRadius * 2,
+    throughAxis: "z"
+  });
+}
+
+function distance2d(x0: number, y0: number, x1: number, y1: number) {
+  return Math.hypot(x0 - x1, y0 - y1);
+}
+
+function distancePointToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number) {
+  const abx = bx - ax;
+  const aby = by - ay;
+  const apx = px - ax;
+  const apy = py - ay;
+  const lengthSquared = abx * abx + aby * aby;
+
+  if (lengthSquared <= 1e-9) {
+    return Math.hypot(px - ax, py - ay);
+  }
+
+  const t = clamp((apx * abx + apy * aby) / lengthSquared, 0, 1);
+  const cx = ax + abx * t;
+  const cy = ay + aby * t;
+
+  return Math.hypot(px - cx, py - cy);
+}
+
+function gaussian(distance: number, sigma: number) {
+  const safeSigma = Math.max(sigma, 0.0001);
+  return Math.exp(-(distance * distance) / (2 * safeSigma * safeSigma));
+}
+
+function smoothBand(distance: number, inner: number, outer: number) {
+  if (distance <= inner) return 1;
+  if (distance >= outer) return 0;
+  const t = (distance - inner) / Math.max(outer - inner, 0.0001);
+  return 1 - t * t * (3 - 2 * t);
+}
+
+function annularBand(distance: number, innerRadius: number, outerRadius: number) {
+  if (distance < innerRadius || distance > outerRadius) return 0;
+  const mid = (innerRadius + outerRadius) / 2;
+  const halfWidth = Math.max((outerRadius - innerRadius) / 2, 0.0001);
+  return clamp(1 - Math.abs(distance - mid) / halfWidth, 0, 1);
+}
+
+function pathLoadBias(
+  x: number,
+  y: number,
+  from: [number, number],
+  to: [number, number],
+  direction: StructuralBracketRequirements["loadCase"]["direction"]
+) {
+  const distanceFromAnchor = distance2d(x, y, from[0], from[1]);
+  const distanceToLoad = distance2d(x, y, to[0], to[1]);
+  const total = Math.max(distanceFromAnchor + distanceToLoad, 1);
+  const axialBias = 1 - Math.abs(distanceFromAnchor - distanceToLoad) / total;
+
+  if (direction === "lateral") return 0.78 + axialBias * 0.36;
+  if (direction === "multi-axis") return 0.82 + axialBias * 0.42;
+  return 0.86 + axialBias * 0.38;
+}
+
+function deterministicNoise(x: number, y: number, seed: string) {
+  let hash = 2166136261;
+  const text = `${seed}:${Math.round(x * 10)}:${Math.round(y * 10)}`;
+
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return ((hash >>> 0) / 4294967295 - 0.5) * 2;
 }
 
 type MeshBuilder = {
