@@ -568,75 +568,75 @@ function buildDensitySurfaceMesh(
   const depth = candidate.depthMm;
   const wall = candidate.wallThicknessMm;
 
-  const nx = density.length;
-  const ny = density[0]?.length ?? 0;
-  const nz = density[0]?.[0]?.length ?? 0;
-
   const boltCount = clamp(Math.round(requirements.mounting.boltCount), 1, 12);
   const boltDiameterMm = Math.max(requirements.mounting.boltDiameterMm, wall * 0.9);
   const railHeight = Math.max(wall * 2.2, height * 0.1);
   const boltPositions = buildBoltPositions(width, height, railHeight, boltCount);
   const loadPoints = buildLoadPoints(width, height, wall, requirements);
 
-  const requestedOpenArea = numberParam(candidate, "targetOpenAreaPercent", candidate.openAreaPercent ?? requirements.objectives.targetOpenAreaPercent ?? 58);
-  const targetSolidFraction = clamp(1 - requestedOpenArea / 100, 0.18, 0.72);
-
-  const flatDensity = density
-    .flat(2)
-    .map((value) => (Number.isFinite(value) ? clamp(value, 0, 1) : 0))
-    .sort((a, b) => a - b);
-  const cutoffIndex = clamp(Math.floor((1 - targetSolidFraction) * Math.max(flatDensity.length - 1, 0)), 0, Math.max(flatDensity.length - 1, 0));
-  const adaptiveThreshold = flatDensity.length ? clamp(flatDensity[cutoffIndex], 0.22, 0.78) : DENSITY_THRESHOLD;
-
-  const occupied = densityToOccupancy(density, adaptiveThreshold);
-
-  // Keep real interfaces, but do not reconstruct fake struts/tubes.
-  // These operations only preserve required load/support pads and open bolt holes.
-  enforceAnchorPads(occupied, {
-    width,
-    height,
-    boltPositions,
-    loadPoints,
-    boltPadRadiusMm: Math.max(boltDiameterMm * 1.55, wall * 2.8),
-    loadPadRadiusMm: Math.max(wall * 3.2, height * 0.08)
-  });
-
-  carveCylindricalVoids(occupied, {
-    width,
-    height,
-    boltPositions,
-    radiusMm: boltDiameterMm / 2
-  });
-
-  addOccupiedVoxelSurface(mesh, {
-    occupied,
+  const skeleton = extractProductionBracketSkeleton({
+    density,
     width,
     height,
     depth,
-    cellWidth: width / Math.max(nx, 1),
-    cellHeight: height / Math.max(ny, 1),
-    cellDepth: depth / Math.max(nz, 1)
+    wall,
+    boltPositions,
+    loadPoints,
+    requirements
   });
 
-  const occupiedCount = countOccupied(occupied);
-  const renderedSolidFraction = occupiedCount.solid / Math.max(occupiedCount.total, 1);
-  const renderedOpenAreaPercent = (1 - renderedSolidFraction) * 100;
+  addProductionMountingInterface(mesh, {
+    width,
+    height,
+    depth,
+    wall,
+    railHeight,
+    boltPositions,
+    boltDiameterMm,
+    requirements
+  });
 
-  candidate.derivedParameters.geometrySource = "direct-density-field-surface";
-  candidate.derivedParameters.fenicsDensityThreshold = roundTo(adaptiveThreshold, 0.001);
-  candidate.derivedParameters.topologyOptimizationStage = "direct-density-voxel-surface";
+  addProductionLoadInterface(mesh, {
+    width,
+    height,
+    depth,
+    wall,
+    railHeight,
+    loadPoints,
+    skeleton,
+    requirements
+  });
+
+  addProductionLoadPathMembers(mesh, {
+    width,
+    height,
+    depth,
+    wall,
+    density,
+    skeleton,
+    boltPositions,
+    loadPoints,
+    requirements
+  });
+
+  addBoltHoleWallFeatures(mesh, {
+    boltPositions,
+    boltDiameterMm,
+    depth: depth * 0.9,
+    wall
+  });
+
+  candidate.derivedParameters.geometrySource = "solver-density-guided-production-bracket";
+  candidate.derivedParameters.topologyOptimizationStage = "density-guided-organic-production-surface";
   candidate.derivedParameters.topologyPostProcessing =
-    "Direct density-field surface extraction. No fake cylinders, tube skeleton, or block reconstruction is added. Only required bolt/load interface pads are preserved and bolt holes are carved open.";
-  candidate.derivedParameters.fenicsRenderedSolidFraction = roundTo(renderedSolidFraction, 0.001);
-  candidate.derivedParameters.fenicsRenderedOpenAreaPercent = roundTo(renderedOpenAreaPercent, 0.1);
+    "Solver density is converted into a manufacturable bracket surface with preserved load and bolt interfaces, open bolt holes, organic load paths, and density-guided branch placement.";
+  candidate.derivedParameters.fenicsDensityThreshold = DENSITY_THRESHOLD;
+  candidate.derivedParameters.topologyHub = `${roundTo(skeleton.loadHub[0], 0.1)},${roundTo(skeleton.loadHub[1], 0.1)}`;
+  candidate.derivedParameters.fenicsOpenAreaPercent = roundTo(stats.openAreaPercent, 0.1);
 
-  const densityFeature: RenderableMeshFeature = {
-    type: "mounting-plate",
-    id: "direct-density-topology-surface",
-    center: [0, 0, 0],
-    size: [width, height, depth]
-  };
-  mesh.features.push(densityFeature);
+  const ribCount = mesh.features.filter((feature) => feature.type === "rib").length;
+  const gussetCount = mesh.features.filter((feature) => feature.type === "gusset").length;
+  const diagonalWebCount = mesh.features.filter((feature) => feature.type === "diagonal-web").length;
 
   return {
     version: "haf-render-mesh-v1",
@@ -648,17 +648,19 @@ function buildDensitySurfaceMesh(
     bounds: { widthMm: width, heightMm: height, depthMm: depth },
     metadata: {
       candidateId: candidate.id,
-      source: "density-field-direct",
+      source: "density-guided-production-bracket",
       solverEngine: String(candidate.derivedParameters.fenicsEngine ?? "unknown"),
-      densityThreshold: roundTo(adaptiveThreshold, 0.001),
-      solidFraction: roundTo(renderedSolidFraction, 0.001),
-      openAreaPercent: roundTo(renderedOpenAreaPercent, 0.1),
+      solidFraction: roundTo(stats.solidFraction, 0.001),
+      openAreaPercent: roundTo(stats.openAreaPercent, 0.1),
       boltCount,
+      lighteningHoleCount: Math.max(3, Math.round(stats.openAreaPercent / 14)),
+      ribCount,
+      gussetCount,
+      diagonalWebCount,
       skeletonized: true
     }
   };
 }
-
 type TopologyOccupancy = {
   occupied: boolean[][][];
   nx: number;
