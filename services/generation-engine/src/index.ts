@@ -339,18 +339,28 @@ function buildStructuralCandidates(
       const estimatedMassKg = (volumeMm3 / 1_000_000) * material.densityGcc;
 
       const targetMass = requirements.objectives.targetMassKg;
+      const requiredSafetyFactor = Math.max(requirements.safetyFactor, 0.1);
+      const achievedSafetyRatio = safetyFactorEstimate / requiredSafetyFactor;
+      const minimumViableMassKg = Math.max(
+        0.08,
+        (requirements.loadCase.forceN * requiredSafetyFactor) /
+          Math.max(material.allowableStressMpa * 35_000, 1)
+      );
+      const massTargetKg = targetMass ?? minimumViableMassKg * 3.2;
 
-      const massScore = targetMass
-        ? clamp(100 - Math.abs(estimatedMassKg - targetMass) * 55, 0, 100)
-        : clamp(100 - estimatedMassKg * 18, 0, 100);
+      const massScore = clamp(
+        targetMass
+          ? 100 - Math.max(0, estimatedMassKg - targetMass) * 95 - Math.max(0, targetMass - estimatedMassKg) * 18
+          : 112 - (estimatedMassKg / Math.max(massTargetKg, 0.001)) * 34,
+        0,
+        100
+      );
 
       const stiffnessScore = clamp(100 - estimatedDisplacementMm * 28, 0, 100);
 
-      const strengthScore = clamp(
-        (safetyFactorEstimate / Math.max(requirements.safetyFactor, 0.1)) * 100,
-        0,
-        125
-      );
+      const strengthScore = achievedSafetyRatio < 1
+        ? clamp(achievedSafetyRatio * 78, 0, 78)
+        : clamp(104 - Math.max(0, achievedSafetyRatio - 1.25) * 14, 72, 104);
 
       const skeletonScore = sealedRequired
         ? 100
@@ -405,39 +415,82 @@ function buildStructuralCandidates(
         100
       );
 
+      const boltCount = clamp(Math.round(requirements.mounting.boltCount), 1, 12);
+      const memberCount = params.ribCount + params.gussetCount + params.diagonalWebCount;
+      const idealMemberCount = boltCount <= 2
+        ? requirements.loadCase.vibrationHz && requirements.loadCase.vibrationHz > 120
+          ? 4
+          : 3
+        : Math.min(8, boltCount + 2);
+      const estimatedNodeCount =
+        boltCount +
+        (params.topologyMode === "direct-load-path" ? 1 : 2) +
+        (params.topologyMode === "vibration-stabilized" ? 1 : 0) +
+        (params.topologyMode === "arched-bridge" ? 1 : 0);
+
+      const topologyFitScore = calculateTopologyFitScore(
+        params.topologyMode,
+        requirements,
+        boltCount,
+        memberCount
+      );
+
+      const efficiencyScore = clamp(
+        100 -
+          Math.abs(achievedSafetyRatio - 1.35) * 18 -
+          Math.max(0, estimatedMassKg / Math.max(minimumViableMassKg, 0.001) - 3.5) * 7 -
+          Math.max(0, material.densityGcc - 4.5) * 7,
+        0,
+        100
+      );
+
+      const excessSafetyPenalty = clamp(Math.max(0, achievedSafetyRatio - 1.75) * 7, 0, 22);
+      const memberPenalty = clamp(Math.max(0, memberCount - idealMemberCount) * 3.8, 0, 24);
+      const nodePenalty = clamp(Math.max(0, estimatedNodeCount - (boltCount + 2)) * 3.2, 0, 16);
+      const heavyMaterialPenalty = clamp(Math.max(0, material.densityGcc - 4.6) * 4.8, 0, 20);
+      const topologyComplexityPenalty = clamp(
+        memberPenalty + nodePenalty + heavyMaterialPenalty + excessSafetyPenalty,
+        0,
+        46
+      );
+
       const performanceScore =
         requirements.objectives.priority === "lightweight"
           ? weightedAverage([
-              [massScore, 0.32],
-              [skeletonScore, 0.24],
-              [strengthScore, 0.2],
-              [stiffnessScore, 0.12],
-              [manufacturabilityScore, 0.12]
+              [massScore, 0.34],
+              [efficiencyScore, 0.24],
+              [strengthScore, 0.18],
+              [topologyFitScore, 0.14],
+              [manufacturabilityScore, 0.1]
             ])
           : requirements.objectives.priority === "stiffness"
             ? weightedAverage([
-                [stiffnessScore, 0.34],
-                [strengthScore, 0.27],
-                [loadPathContinuityScore, 0.18],
-                [manufacturabilityScore, 0.12],
-                [massScore, 0.09]
+                [stiffnessScore, 0.27],
+                [strengthScore, 0.23],
+                [efficiencyScore, 0.2],
+                [topologyFitScore, 0.16],
+                [massScore, 0.14]
               ])
             : weightedAverage([
-                [strengthScore, 0.24],
-                [stiffnessScore, 0.21],
-                [skeletonScore, 0.19],
-                [manufacturabilityScore, 0.16],
-                [supportBurdenScore, 0.11],
-                [massScore, 0.09]
+                [efficiencyScore, 0.25],
+                [massScore, 0.22],
+                [strengthScore, 0.19],
+                [topologyFitScore, 0.16],
+                [manufacturabilityScore, 0.11],
+                [stiffnessScore, 0.07]
               ]);
 
-      const totalScore = weightedAverage([
-        [performanceScore, 0.48],
-        [manufacturabilityScore, 0.19],
-        [supportBurdenScore, 0.11],
-        [massScore, 0.12],
-        [loadPathContinuityScore, 0.1]
-      ]);
+      const totalScore = clamp(
+        weightedAverage([
+          [performanceScore, 0.42],
+          [efficiencyScore, 0.2],
+          [massScore, 0.18],
+          [topologyFitScore, 0.12],
+          [manufacturabilityScore, 0.08]
+        ]) - topologyComplexityPenalty,
+        0,
+        100
+      );
 
       const candidate: CandidateGeometry = {
         id: `${options.idPrefix}_${family.replace(/[^a-z0-9]/gi, "-")}_cand_${String(
@@ -476,6 +529,16 @@ function buildStructuralCandidates(
           openAreaPercent: roundTo(openAreaPercent, 0.1),
           latticeCellCount,
           loadPathContinuityScore: roundTo(loadPathContinuityScore, 0.1),
+          optimizationObjective: "minimum viable mass at required safety factor",
+          achievedSafetyRatio: roundTo(achievedSafetyRatio, 0.01),
+          minimumViableMassKg: roundTo(minimumViableMassKg, 0.001),
+          massTargetKg: roundTo(massTargetKg, 0.001),
+          efficiencyScore: roundTo(efficiencyScore, 0.1),
+          topologyFitScore: roundTo(topologyFitScore, 0.1),
+          topologyComplexityPenalty: roundTo(topologyComplexityPenalty, 0.1),
+          estimatedMemberCount: memberCount,
+          idealMemberCount,
+          estimatedNodeCount,
           boltPadDiameterMm: roundTo(requirements.mounting.boltDiameterMm * 2.4, 0.1),
           requiredLoadN: roundTo(requiredLoadN, 0.1),
           loadDirection: requirements.loadCase.direction,
@@ -674,7 +737,7 @@ function buildTopologyField(args: {
     ? [[width * 0.38, height * 0.18], [width * 0.38, -height * 0.18]]
     : requirements.loadCase.direction === "multi-axis"
       ? [[0, topLoadY], [-loadSpread, topLoadY - height * 0.08], [loadSpread, topLoadY - height * 0.08]]
-      : [[0, topLoadY], [-loadSpread, topLoadY], [loadSpread, topLoadY]];
+      : [[0, topLoadY]];
 
   const samples: Array<{
     column: number;
@@ -2196,6 +2259,64 @@ function resolveSkeletonizationPolicy(
   if (requested === "aggressive") return "aggressive";
 
   return "auto";
+}
+
+function calculateTopologyFitScore(
+  topologyMode: StructuralTopologyMode,
+  requirements: StructuralBracketRequirements,
+  boltCount: number,
+  memberCount: number
+) {
+  const direction = requirements.loadCase.direction;
+  const vibrationHz = requirements.loadCase.vibrationHz ?? 0;
+
+  let score = 72;
+
+  if (boltCount <= 2 && direction === "vertical") {
+    score = topologyMode === "direct-load-path"
+      ? 100
+      : topologyMode === "split-y-truss"
+        ? 78
+        : topologyMode === "arched-bridge"
+          ? 74
+          : topologyMode === "vibration-stabilized"
+            ? vibrationHz > 140
+              ? 82
+              : 64
+            : 58;
+  } else if (direction === "lateral") {
+    score = topologyMode === "cantilever-side-load"
+      ? 100
+      : topologyMode === "split-y-truss"
+        ? 78
+        : topologyMode === "vibration-stabilized"
+          ? vibrationHz > 120
+            ? 82
+            : 68
+          : 60;
+  } else if (direction === "multi-axis") {
+    score = topologyMode === "split-y-truss"
+      ? 92
+      : topologyMode === "vibration-stabilized"
+        ? vibrationHz > 90
+          ? 90
+          : 76
+        : topologyMode === "arched-bridge"
+          ? 82
+          : 74;
+  } else {
+    score = topologyMode === "direct-load-path" ? 96 : topologyMode === "split-y-truss" ? 82 : 76;
+  }
+
+  if (vibrationHz > 120 && topologyMode !== "vibration-stabilized") {
+    score -= 4;
+  }
+
+  if (memberCount > (boltCount <= 2 ? 4 : boltCount + 3)) {
+    score -= Math.min(18, (memberCount - (boltCount <= 2 ? 4 : boltCount + 3)) * 3);
+  }
+
+  return clamp(score, 0, 100);
 }
 
 function calculateOpenAreaPercent(
