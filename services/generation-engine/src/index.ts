@@ -476,12 +476,6 @@ function buildDensitySurfaceMesh(
   const height = candidate.heightMm;
   const depth = candidate.depthMm;
   const wall = candidate.wallThicknessMm;
-  const nx = density.length;
-  const ny = density[0]?.length ?? 1;
-  const nz = density[0]?.[0]?.length ?? 1;
-  const cellWidth = width / nx;
-  const cellHeight = height / ny;
-  const cellDepth = depth / nz;
   const railHeight = Math.max(wall * 2.1, height * 0.095);
   const boltCount = clamp(Math.round(requirements.mounting.boltCount), 1, 12);
   const boltDiameterMm = Math.max(requirements.mounting.boltDiameterMm, wall * 0.9);
@@ -495,21 +489,53 @@ function buildDensitySurfaceMesh(
     boltPositions,
     radiusMm: Math.max(boltDiameterMm * 0.52, wall * 0.55)
   });
-  enforceAnchorPads(occupied, {
+
+  const skeleton = extractDensitySkeleton({
+    density,
+    occupied,
     width,
     height,
+    depth,
+    wall,
     boltPositions,
     loadPoints,
-    boltPadRadiusMm: Math.max(boltDiameterMm * 1.65, wall * 2.2),
-    loadPadRadiusMm: Math.max(wall * 3.2, width * 0.055)
+    requirements
   });
-  addOccupiedVoxelSurface(mesh, { occupied, width, height, depth, cellWidth, cellHeight, cellDepth });
+
+  addPerimeterReferenceFrame(mesh, {
+    width,
+    height,
+    depth,
+    wall,
+    railHeight,
+    requirements
+  });
+
+  addDensityReconstructedSkeleton(mesh, {
+    width,
+    height,
+    depth,
+    wall,
+    density,
+    skeleton,
+    boltPositions,
+    loadPoints,
+    requirements
+  });
+
   addBoltHoleWallFeatures(mesh, { boltPositions, boltDiameterMm, depth, wall });
   addLoadInterfacePad(mesh, { width, height, depth, wall, requirements });
 
-  candidate.derivedParameters.geometrySource = "fenics-density-field-direct-surface";
+  candidate.derivedParameters.geometrySource = "fenics-density-skeleton-reconstruction";
   candidate.derivedParameters.topologyPostProcessing =
-    "FEniCS density field thresholded into exposed-surface voxels with bolt void carving and anchor pad enforcement.";
+    "FEniCS density field thresholded, reduced to bolt/load-connected skeleton paths, then rebuilt as smooth manufacturable beam members instead of raw voxels.";
+  candidate.derivedParameters.fenicsSkeletonNodes = skeleton.nodes.length;
+  candidate.derivedParameters.fenicsSkeletonPaths = skeleton.paths.length;
+  candidate.derivedParameters.fenicsDensityThreshold = DENSITY_THRESHOLD;
+
+  const ribCount = mesh.features.filter((feature) => feature.type === "rib").length;
+  const gussetCount = mesh.features.filter((feature) => feature.type === "gusset").length;
+  const diagonalWebCount = mesh.features.filter((feature) => feature.type === "diagonal-web").length;
 
   return {
     version: "haf-render-mesh-v1",
@@ -521,15 +547,316 @@ function buildDensitySurfaceMesh(
     bounds: { widthMm: width, heightMm: height, depthMm: depth },
     metadata: {
       candidateId: candidate.id,
-      source: "fenics-density-field-direct-surface",
+      source: "fenics-density-skeleton-reconstruction",
       boltCount,
-      lighteningHoleCount: Math.max(1, Math.round(stats.openAreaPercent / 8)),
-      ribCount: 0,
-      gussetCount: 0,
-      diagonalWebCount: 0,
+      lighteningHoleCount: Math.max(1, Math.round(stats.openAreaPercent / 12)),
+      ribCount,
+      gussetCount,
+      diagonalWebCount,
       skeletonized: true
     }
   };
+}
+
+type DensitySkeletonNode = {
+  id: string;
+  point: [number, number];
+  radius: number;
+  group: string;
+};
+
+type DensitySkeletonPath = {
+  id: string;
+  from: [number, number];
+  control: [number, number];
+  to: [number, number];
+  thickness: number;
+  group: string;
+  shade: number;
+};
+
+type DensitySkeleton = {
+  nodes: DensitySkeletonNode[];
+  paths: DensitySkeletonPath[];
+};
+
+function extractDensitySkeleton(args: {
+  density: number[][][];
+  occupied: boolean[][][];
+  width: number;
+  height: number;
+  depth: number;
+  wall: number;
+  boltPositions: Array<[number, number]>;
+  loadPoints: Array<[number, number]>;
+  requirements: StructuralBracketRequirements;
+}): DensitySkeleton {
+  const { density, width, height, wall, boltPositions, loadPoints, requirements } = args;
+  const boltCenter = averagePoints(boltPositions);
+  const loadCenter = averagePoints(loadPoints);
+  const densityCentroid = weightedDensityCentroid(density, width, height);
+  const loadScale = clamp(requirements.loadCase.forceN / 2500, 0.75, 1.65);
+  const vibrationScale = clamp((requirements.loadCase.vibrationHz ?? 0) / 150, 0, 1.4);
+  const baseThickness = Math.max(wall * 1.18, Math.min(width, height) * 0.042) * loadScale;
+  const coreNode: [number, number] = [
+    clamp(densityCentroid[0] * 0.45 + boltCenter[0] * 0.2 + loadCenter[0] * 0.35, -width * 0.22, width * 0.22),
+    clamp(densityCentroid[1] * 0.45 + boltCenter[1] * 0.2 + loadCenter[1] * 0.35, -height * 0.14, height * 0.24)
+  ];
+  const upperNode: [number, number] = [
+    clamp(loadCenter[0], -width * 0.18, width * 0.18),
+    clamp(loadCenter[1] - height * 0.045, -height * 0.04, height * 0.34)
+  ];
+  const nodes: DensitySkeletonNode[] = [
+    { id: "fenics-core-density-node", point: coreNode, radius: baseThickness * 1.18, group: "rib" },
+    { id: "fenics-upper-load-node", point: upperNode, radius: baseThickness * 0.96, group: "load-plate" }
+  ];
+  const paths: DensitySkeletonPath[] = [];
+
+  boltPositions.forEach((bolt, index) => {
+    const start = offsetPointAlongSegment(bolt, coreNode, Math.max(wall * 2.2, baseThickness * 1.35));
+    const side = bolt[0] < coreNode[0] ? -1 : 1;
+    const control = densityGuidedControlPoint({
+      density,
+      width,
+      height,
+      from: start,
+      to: coreNode,
+      preferredOffset: [side * width * 0.055, height * 0.055]
+    });
+    const localDensity = sampleDensityAtPoint(density, (start[0] + coreNode[0]) / 2, (start[1] + coreNode[1]) / 2, width, height);
+
+    paths.push({
+      id: `fenics-primary-bolt-${index + 1}-to-core`,
+      from: start,
+      control,
+      to: coreNode,
+      thickness: baseThickness * clamp(0.9 + localDensity * 0.42, 0.82, 1.38),
+      group: "diagonal-web",
+      shade: 0.68
+    });
+  });
+
+  paths.push({
+    id: "fenics-core-to-load-node",
+    from: coreNode,
+    control: densityGuidedControlPoint({
+      density,
+      width,
+      height,
+      from: coreNode,
+      to: upperNode,
+      preferredOffset: [0, height * 0.035]
+    }),
+    to: upperNode,
+    thickness: baseThickness * 0.92,
+    group: "diagonal-web",
+    shade: 0.72
+  });
+
+  loadPoints.forEach((loadPoint, index) => {
+    const end = offsetPointAlongSegment(loadPoint, upperNode, Math.max(wall * 1.7, baseThickness * 0.7));
+    paths.push({
+      id: `fenics-load-spreader-${index + 1}`,
+      from: upperNode,
+      control: [(upperNode[0] + end[0]) / 2, (upperNode[1] + end[1]) / 2 + height * 0.018],
+      to: end,
+      thickness: baseThickness * 0.58,
+      group: "gusset",
+      shade: 0.6
+    });
+  });
+
+  if (boltPositions.length >= 2) {
+    const sortedBolts = [...boltPositions].sort((a, b) => a[0] - b[0]);
+    for (let index = 0; index < sortedBolts.length - 1; index += 1) {
+      const left = sortedBolts[index];
+      const right = sortedBolts[index + 1];
+      const leftStart = offsetPointAlongSegment(left, right, Math.max(wall * 2.0, baseThickness * 1.15));
+      const rightStart = offsetPointAlongSegment(right, left, Math.max(wall * 2.0, baseThickness * 1.15));
+      paths.push({
+        id: `fenics-bolt-tension-bridge-${index + 1}`,
+        from: leftStart,
+        control: [(leftStart[0] + rightStart[0]) / 2, Math.min(leftStart[1], rightStart[1]) - height * 0.035],
+        to: rightStart,
+        thickness: baseThickness * 0.48,
+        group: "rib",
+        shade: 0.52
+      });
+    }
+  }
+
+  if (vibrationScale > 0.2) {
+    const stabilizerY = clamp(coreNode[1] - height * 0.075, -height * 0.24, height * 0.1);
+    paths.push({
+      id: "fenics-vibration-cross-stabilizer",
+      from: [-width * 0.31, stabilizerY],
+      control: [0, stabilizerY + height * 0.04],
+      to: [width * 0.31, stabilizerY + height * 0.055],
+      thickness: baseThickness * (0.32 + vibrationScale * 0.15),
+      group: "rib",
+      shade: 0.48
+    });
+  }
+
+  return { nodes, paths };
+}
+
+function addPerimeterReferenceFrame(mesh: MeshBuilder, args: { width: number; height: number; depth: number; wall: number; railHeight: number; requirements: StructuralBracketRequirements }) {
+  const { width, height, depth, wall, railHeight } = args;
+  const frameThickness = Math.max(wall * 0.8, Math.min(width, height) * 0.022);
+  const frameDepth = depth * 0.72;
+  addBoxFeature(mesh, { id: "fenics-reference-top-load-rail", group: "load-plate", min: [-width / 2, height / 2 - railHeight * 0.72, -frameDepth / 2], max: [width / 2, height / 2 - railHeight * 0.28, frameDepth / 2], shade: 0.55 });
+  addBoxFeature(mesh, { id: "fenics-reference-bottom-mount-rail", group: "mounting-plate", min: [-width / 2, -height / 2 + railHeight * 0.18, -frameDepth / 2], max: [width / 2, -height / 2 + railHeight * 0.58, frameDepth / 2], shade: 0.52 });
+  addBoxFeature(mesh, { id: "fenics-reference-left-side-rail", group: "rib", min: [-width / 2, -height / 2, -frameDepth / 2], max: [-width / 2 + frameThickness, height / 2, frameDepth / 2], shade: 0.46 });
+  addBoxFeature(mesh, { id: "fenics-reference-right-side-rail", group: "rib", min: [width / 2 - frameThickness, -height / 2, -frameDepth / 2], max: [width / 2, height / 2, frameDepth / 2], shade: 0.46 });
+}
+
+function addDensityReconstructedSkeleton(mesh: MeshBuilder, args: { width: number; height: number; depth: number; wall: number; density: number[][][]; skeleton: DensitySkeleton; boltPositions: Array<[number, number]>; loadPoints: Array<[number, number]>; requirements: StructuralBracketRequirements }) {
+  const { width, height, depth, density, skeleton } = args;
+  const memberDepth = depth * 0.78;
+
+  for (const node of skeleton.nodes) {
+    const densityAtNode = sampleDensityAtPoint(density, node.point[0], node.point[1], width, height);
+    addOrganicNodePad(mesh, {
+      id: node.id,
+      group: node.group,
+      center: [node.point[0], node.point[1], 0],
+      radius: node.radius * clamp(0.78 + densityAtNode * 0.38, 0.72, 1.24),
+      depth: memberDepth,
+      segments: 28,
+      shade: node.group === "load-plate" ? 0.72 : 0.64
+    });
+  }
+
+  skeleton.paths.forEach((path) => addOrganicPathFeature(mesh, { ...path, density, width, height, depth: memberDepth }));
+}
+
+function addOrganicPathFeature(mesh: MeshBuilder, options: DensitySkeletonPath & { density: number[][][]; width: number; height: number; depth: number }) {
+  const segments = 8;
+  let previous = options.from;
+  const z = -options.depth / 2;
+  for (let index = 1; index <= segments; index += 1) {
+    const t = index / segments;
+    const point = quadraticPoint(options.from, options.control, options.to, t);
+    const midpoint: [number, number] = [(previous[0] + point[0]) / 2, (previous[1] + point[1]) / 2];
+    const densityValue = sampleDensityAtPoint(options.density, midpoint[0], midpoint[1], options.width, options.height);
+    const taper = 1 - Math.abs(t - 0.5) * 0.28;
+    const thickness = options.thickness * clamp(0.72 + densityValue * 0.58, 0.62, 1.45) * taper;
+    addOrientedBoxSegment(mesh, { id: `${options.id}-segment-${index}`, group: options.group, start: [previous[0], previous[1], z], end: [point[0], point[1], z], thickness, depth: options.depth, shade: options.shade + densityValue * 0.12 });
+    previous = point;
+  }
+}
+
+function addOrientedBoxSegment(mesh: MeshBuilder, options: { id: string; group: string; start: Vec3; end: Vec3; thickness: number; depth: number; shade: number }) {
+  const dx = options.end[0] - options.start[0];
+  const dy = options.end[1] - options.start[1];
+  const length = Math.max(Math.hypot(dx, dy), 0.001);
+  const nx = -dy / length;
+  const ny = dx / length;
+  const halfThickness = options.thickness / 2;
+  const z0 = Math.min(options.start[2], options.end[2]);
+  const z1 = z0 + options.depth;
+  const a0: Vec3 = [options.start[0] + nx * halfThickness, options.start[1] + ny * halfThickness, z0];
+  const a1: Vec3 = [options.start[0] - nx * halfThickness, options.start[1] - ny * halfThickness, z0];
+  const b0: Vec3 = [options.end[0] + nx * halfThickness, options.end[1] + ny * halfThickness, z0];
+  const b1: Vec3 = [options.end[0] - nx * halfThickness, options.end[1] - ny * halfThickness, z0];
+  const a0f: Vec3 = [a0[0], a0[1], z1];
+  const a1f: Vec3 = [a1[0], a1[1], z1];
+  const b0f: Vec3 = [b0[0], b0[1], z1];
+  const b1f: Vec3 = [b1[0], b1[1], z1];
+  addQuad(mesh, [a0f, b0f, b1f, a1f], options.group, options.shade * 1.08);
+  addQuad(mesh, [a0, a1, b1, b0], options.group, options.shade * 0.78);
+  addQuad(mesh, [a0, b0, b0f, a0f], options.group, options.shade * 0.9);
+  addQuad(mesh, [a1, a1f, b1f, b1], options.group, options.shade * 0.74);
+  addQuad(mesh, [a0, a0f, a1f, a1], options.group, options.shade * 0.7);
+  addQuad(mesh, [b0, b1, b1f, b0f], options.group, options.shade * 0.86);
+  mesh.features.push({ type: options.group, id: options.id, center: [(options.start[0] + options.end[0]) / 2, (options.start[1] + options.end[1]) / 2, (z0 + z1) / 2], size: [length, options.thickness, options.depth], rotationDeg: Math.atan2(dy, dx) * (180 / Math.PI) } as RenderableMeshFeature);
+}
+
+function addOrganicNodePad(mesh: MeshBuilder, options: { id: string; group: string; center: Vec3; radius: number; depth: number; segments: number; shade: number }) {
+  const start = mesh.vertices.length;
+  const z0 = options.center[2] - options.depth / 2;
+  const z1 = options.center[2] + options.depth / 2;
+  for (const z of [z0, z1]) {
+    mesh.vertices.push([options.center[0], options.center[1], z]);
+    for (let index = 0; index < options.segments; index += 1) {
+      const angle = (Math.PI * 2 * index) / options.segments;
+      const organicRadius = options.radius * (0.94 + 0.08 * Math.sin(index * 1.7));
+      mesh.vertices.push([options.center[0] + Math.cos(angle) * organicRadius, options.center[1] + Math.sin(angle) * organicRadius, z]);
+    }
+  }
+  const backCenter = start;
+  const backRing = start + 1;
+  const frontCenter = start + 1 + options.segments;
+  const frontRing = frontCenter + 1;
+  for (let index = 0; index < options.segments; index += 1) {
+    const next = (index + 1) % options.segments;
+    addFace(mesh, [frontCenter, frontRing + index, frontRing + next], options.group, options.shade * 1.08);
+    addFace(mesh, [backCenter, backRing + next, backRing + index], options.group, options.shade * 0.76);
+    addFace(mesh, [backRing + index, backRing + next, frontRing + next, frontRing + index], options.group, options.shade * 0.86);
+  }
+  mesh.features.push({ type: options.group, id: options.id, center: options.center, diameterMm: options.radius * 2, throughAxis: "z" } as RenderableMeshFeature);
+}
+
+function quadraticPoint(from: [number, number], control: [number, number], to: [number, number], t: number): [number, number] {
+  const oneMinusT = 1 - t;
+  return [oneMinusT * oneMinusT * from[0] + 2 * oneMinusT * t * control[0] + t * t * to[0], oneMinusT * oneMinusT * from[1] + 2 * oneMinusT * t * control[1] + t * t * to[1]];
+}
+
+function averagePoints(points: Array<[number, number]>): [number, number] {
+  if (!points.length) return [0, 0];
+  const sum = points.reduce((current, point) => [current[0] + point[0], current[1] + point[1]] as [number, number], [0, 0] as [number, number]);
+  return [sum[0] / points.length, sum[1] / points.length];
+}
+
+function offsetPointAlongSegment(from: [number, number], to: [number, number], distance: number): [number, number] {
+  const dx = to[0] - from[0];
+  const dy = to[1] - from[1];
+  const length = Math.max(Math.hypot(dx, dy), 0.0001);
+  const t = clamp(distance / length, 0, 0.86);
+  return [from[0] + dx * t, from[1] + dy * t];
+}
+
+function weightedDensityCentroid(density: number[][][], width: number, height: number): [number, number] {
+  const nx = density.length;
+  const ny = density[0]?.length ?? 1;
+  const nz = density[0]?.[0]?.length ?? 1;
+  let weightedX = 0;
+  let weightedY = 0;
+  let total = 0;
+  for (let x = 0; x < nx; x += 1) {
+    const xMm = -width / 2 + ((x + 0.5) / nx) * width;
+    for (let y = 0; y < ny; y += 1) {
+      const yMm = -height / 2 + ((y + 0.5) / ny) * height;
+      let columnWeight = 0;
+      for (let z = 0; z < nz; z += 1) columnWeight += Number.isFinite(density[x][y][z]) ? clamp(density[x][y][z], 0, 1) : 0;
+      weightedX += xMm * columnWeight;
+      weightedY += yMm * columnWeight;
+      total += columnWeight;
+    }
+  }
+  if (total <= 0) return [0, 0];
+  return [weightedX / total, weightedY / total];
+}
+
+function densityGuidedControlPoint(args: { density: number[][][]; width: number; height: number; from: [number, number]; to: [number, number]; preferredOffset: [number, number] }): [number, number] {
+  const center: [number, number] = [(args.from[0] + args.to[0]) / 2, (args.from[1] + args.to[1]) / 2];
+  const candidates: Array<[number, number]> = [[center[0] + args.preferredOffset[0], center[1] + args.preferredOffset[1]], [center[0] - args.preferredOffset[0] * 0.65, center[1] + args.preferredOffset[1] * 0.55], center];
+  return candidates.sort((a, b) => sampleDensityAtPoint(args.density, b[0], b[1], args.width, args.height) - sampleDensityAtPoint(args.density, a[0], a[1], args.width, args.height))[0];
+}
+
+function sampleDensityAtPoint(density: number[][][], xMm: number, yMm: number, widthMm: number, heightMm: number) {
+  const nx = density.length;
+  const ny = density[0]?.length ?? 1;
+  const nz = density[0]?.[0]?.length ?? 1;
+  const xIndex = clamp(Math.round(((xMm + widthMm / 2) / Math.max(widthMm, 1)) * (nx - 1)), 0, nx - 1);
+  const yIndex = clamp(Math.round(((yMm + heightMm / 2) / Math.max(heightMm, 1)) * (ny - 1)), 0, ny - 1);
+  let total = 0;
+  for (let z = 0; z < nz; z += 1) {
+    const raw = density[xIndex]?.[yIndex]?.[z] ?? 0;
+    total += typeof raw === "number" && Number.isFinite(raw) ? clamp(raw, 0, 1) : 0;
+  }
+  return total / Math.max(nz, 1);
 }
 
 function densityToOccupancy(density: number[][][], threshold: number) {
