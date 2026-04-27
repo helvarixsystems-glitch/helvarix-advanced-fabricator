@@ -476,65 +476,220 @@ function buildDensitySurfaceMesh(
   const height = candidate.heightMm;
   const depth = candidate.depthMm;
   const wall = candidate.wallThicknessMm;
-  const railHeight = Math.max(wall * 2.15, height * 0.105);
   const boltCount = clamp(Math.round(requirements.mounting.boltCount), 1, 12);
   const boltDiameterMm = Math.max(requirements.mounting.boltDiameterMm, wall * 0.9);
+  const railHeight = Math.max(wall * 2.2, height * 0.1);
   const boltPositions = buildBoltPositions(width, height, railHeight, boltCount);
   const loadPoints = buildLoadPoints(width, height, wall, requirements);
-  const productionSkeleton = extractProductionBracketSkeleton({
-    density,
+  const loadPoint = averagePoints(loadPoints);
+  const field = topologyOptimizeDensityField(density, {
     width,
     height,
-    depth,
-    wall,
     boltPositions,
     loadPoints,
-    requirements
-  });
-
-  addProductionMountingInterface(mesh, {
-    width,
-    height,
-    depth,
-    wall,
-    railHeight,
-    boltPositions,
     boltDiameterMm,
     requirements
   });
+  const stressScale = clamp(requirements.loadCase.forceN / 2500, 0.78, 1.75);
+  const vibrationScale = clamp((requirements.loadCase.vibrationHz ?? 0) / 180, 0, 1.35);
+  const memberDepth = depth * 0.74;
+  const minMemberRadius = Math.max(wall * 0.72, Math.min(width, height) * 0.024);
+  const primaryRadius = Math.max(wall * 1.18, Math.min(width, height) * 0.043) * stressScale;
+  const secondaryRadius = Math.max(wall * 0.72, Math.min(width, height) * 0.026) * (1 + vibrationScale * 0.18);
+  const landDepth = depth * 0.86;
+  const baseLandWidth = clamp(requirements.mounting.spacingMm + boltDiameterMm * 4.4, width * 0.64, width * 0.94);
+  const baseLandHeight = Math.max(wall * 2.6, height * 0.085);
+  const baseY0 = Math.min(...boltPositions.map((p) => p[1])) - baseLandHeight * 0.52;
+  const baseY1 = baseY0 + baseLandHeight;
+  const loadLandWidth = requirements.loadCase.direction === "lateral" ? width * 0.34 : width * 0.46;
+  const loadLandHeight = Math.max(wall * 2.55, height * 0.085);
+  const loadLandCenter: [number, number] = [
+    clamp(loadPoint[0], -width * 0.18, width * 0.18),
+    clamp(loadPoint[1], height * 0.28, height * 0.44)
+  ];
 
-  addProductionLoadInterface(mesh, {
-    width,
-    height,
-    depth,
-    wall,
-    railHeight,
-    loadPoints,
-    skeleton: productionSkeleton,
-    requirements
+  addBoxFeature(mesh, {
+    id: "topopt-flat-mounting-land",
+    group: "mounting-plate",
+    min: [-baseLandWidth / 2, baseY0, -landDepth / 2],
+    max: [baseLandWidth / 2, baseY1, landDepth / 2],
+    shade: 0.56
   });
 
-  addProductionLoadPathMembers(mesh, {
+  addBoxFeature(mesh, {
+    id: "topopt-flat-load-interface-land",
+    group: "load-plate",
+    min: [loadLandCenter[0] - loadLandWidth / 2, loadLandCenter[1] - loadLandHeight / 2, -landDepth / 2],
+    max: [loadLandCenter[0] + loadLandWidth / 2, loadLandCenter[1] + loadLandHeight / 2, landDepth / 2],
+    shade: 0.62
+  });
+
+  boltPositions.forEach(([x, y], index) => {
+    addFlatBossPad(mesh, {
+      id: `topopt-bolt-seat-${index + 1}`,
+      group: "mounting-plate",
+      center: [x, y, 0],
+      radiusX: Math.max(boltDiameterMm * 1.55, wall * 2.3),
+      radiusY: Math.max(boltDiameterMm * 1.42, wall * 2.05),
+      depth: landDepth * 1.05,
+      segments: 36,
+      shade: 0.64
+    });
+  });
+
+  addFlatBossPad(mesh, {
+    id: "topopt-load-spreader-boss",
+    group: "load-plate",
+    center: [loadLandCenter[0], loadLandCenter[1] - loadLandHeight * 0.55, 0],
+    radiusX: Math.max(loadLandWidth * 0.22, wall * 2.2),
+    radiusY: Math.max(loadLandHeight * 0.78, wall * 2.1),
+    depth: landDepth * 0.92,
+    segments: 36,
+    shade: 0.68
+  });
+
+  const hub = topologyFindLoadHub(field, width, height, boltPositions, loadLandCenter);
+  addOrganicNodePad(mesh, {
+    id: "topopt-compliance-load-hub",
+    group: "diagonal-web",
+    center: [hub[0], hub[1], 0],
+    radius: primaryRadius * 0.92,
+    depth: memberDepth,
+    segments: 32,
+    shade: 0.66
+  });
+
+  const pathSummaries: Array<{ id: string; points: Vec3[]; radius: number; group: string }> = [];
+
+  boltPositions.forEach((bolt, index) => {
+    const start = offsetPointAlongSegment(bolt, hub, Math.max(primaryRadius * 1.55, boltDiameterMm * 1.1));
+    const optimizedPath = topologyTraceOptimalPath(field, {
+      from: hub,
+      to: start,
+      width,
+      height,
+      preferCompressionArch: requirements.loadCase.direction === "vertical",
+      sideBias: bolt[0] < hub[0] ? -1 : 1
+    });
+    const smoothedPath = topologySmoothPath(optimizedPath, width, height);
+    const points = smoothedPath.map(([x, y]) => [x, y, 0] as Vec3);
+
+    addTopologyOptimizedMember(mesh, {
+      id: `topopt-primary-compression-arm-${index + 1}`,
+      group: "diagonal-web",
+      points,
+      baseRadius: primaryRadius,
+      minRadius: minMemberRadius,
+      depth: memberDepth,
+      width,
+      height,
+      field,
+      shade: 0.68
+    });
+
+    pathSummaries.push({ id: `primary-${index + 1}`, points, radius: primaryRadius, group: "diagonal-web" });
+  });
+
+  if (boltPositions.length >= 2) {
+    const sortedBolts = [...boltPositions].sort((a, b) => a[0] - b[0]);
+    const left = sortedBolts[0];
+    const right = sortedBolts[sortedBolts.length - 1];
+    const leftStart = offsetPointAlongSegment(left, right, Math.max(boltDiameterMm * 1.25, secondaryRadius * 1.7));
+    const rightStart = offsetPointAlongSegment(right, left, Math.max(boltDiameterMm * 1.25, secondaryRadius * 1.7));
+    const tiePath = topologySmoothPath(
+      [
+        leftStart,
+        [(leftStart[0] + rightStart[0]) / 2, Math.min(leftStart[1], rightStart[1]) - height * 0.028],
+        rightStart
+      ],
+      width,
+      height
+    );
+
+    addTopologyOptimizedMember(mesh, {
+      id: "topopt-bottom-tension-tie",
+      group: "rib",
+      points: tiePath.map(([x, y]) => [x, y, 0] as Vec3),
+      baseRadius: secondaryRadius * 0.92,
+      minRadius: minMemberRadius * 0.8,
+      depth: memberDepth * 0.82,
+      width,
+      height,
+      field,
+      shade: 0.5
+    });
+
+    addTopologyShearWeb(mesh, {
+      id: "topopt-left-density-shear-web",
+      from: offsetPointAlongSegment(left, hub, Math.max(primaryRadius * 1.85, boltDiameterMm * 1.35)),
+      apex: [hub[0] - primaryRadius * 0.48, hub[1] - primaryRadius * 0.25],
+      bridge: [(leftStart[0] + hub[0]) / 2, baseY1 + wall * 0.55],
+      depth: depth * 0.24,
+      shade: 0.41
+    });
+
+    addTopologyShearWeb(mesh, {
+      id: "topopt-right-density-shear-web",
+      from: offsetPointAlongSegment(right, hub, Math.max(primaryRadius * 1.85, boltDiameterMm * 1.35)),
+      apex: [hub[0] + primaryRadius * 0.48, hub[1] - primaryRadius * 0.25],
+      bridge: [(rightStart[0] + hub[0]) / 2, baseY1 + wall * 0.55],
+      depth: depth * 0.24,
+      shade: 0.41
+    });
+  }
+
+  const loadNeckPath = topologySmoothPath(
+    [
+      [loadLandCenter[0], loadLandCenter[1] - loadLandHeight * 0.65],
+      [hub[0], (hub[1] + loadLandCenter[1]) / 2],
+      hub
+    ],
+    width,
+    height
+  );
+
+  addTopologyOptimizedMember(mesh, {
+    id: "topopt-load-introduction-neck",
+    group: "diagonal-web",
+    points: loadNeckPath.map(([x, y]) => [x, y, 0] as Vec3),
+    baseRadius: primaryRadius * 0.78,
+    minRadius: minMemberRadius,
+    depth: memberDepth * 0.9,
     width,
     height,
-    depth,
-    wall,
-    density,
-    skeleton: productionSkeleton,
-    boltPositions,
-    loadPoints,
-    requirements
+    field,
+    shade: 0.7
   });
+
+  if (vibrationScale > 0.15) {
+    const stabilizerY = clamp(hub[1] - height * 0.08, baseY1 + wall * 1.4, hub[1] - wall);
+    addTopologyOptimizedMember(mesh, {
+      id: "topopt-vibration-stabilizer-web",
+      group: "gusset",
+      points: [
+        [-width * 0.29, stabilizerY, 0],
+        [0, stabilizerY + height * 0.035, 0],
+        [width * 0.29, stabilizerY, 0]
+      ],
+      baseRadius: secondaryRadius * clamp(0.62 + vibrationScale * 0.18, 0.58, 0.92),
+      minRadius: minMemberRadius * 0.7,
+      depth: memberDepth * 0.58,
+      width,
+      height,
+      field,
+      shade: 0.46
+    });
+  }
 
   addBoltHoleWallFeatures(mesh, { boltPositions, boltDiameterMm, depth, wall });
 
-  candidate.derivedParameters.geometrySource = "fenics-density-manufacturable-bracket-reconstruction";
+  candidate.derivedParameters.geometrySource = "fenics-density-compliance-topology-reconstruction";
   candidate.derivedParameters.topologyPostProcessing =
-    "FEniCS density field interpreted into manufacturable bracket geometry: flat mounting lands, bolt bosses with through holes, a defined load interface, primary load-path members, shear webs, and controlled node transitions.";
-  candidate.derivedParameters.fenicsSkeletonNodes = productionSkeleton.nodes.length;
-  candidate.derivedParameters.fenicsSkeletonPaths = productionSkeleton.paths.length;
+    "FEniCS density field is smoothed, thresholded, routed by density-weighted shortest paths from load interface to mounting constraints, and reconstructed as manufacturable compliance-minimizing bracket geometry with flat interfaces, bolt bosses, variable-radius primary members, shear webs, and a tension tie.";
   candidate.derivedParameters.fenicsDensityThreshold = DENSITY_THRESHOLD;
-  candidate.derivedParameters.productionGeometryStage = "interface-locked-load-path-rebuild";
+  candidate.derivedParameters.topologyOptimizationStage = "density-weighted-compliance-load-path-routing";
+  candidate.derivedParameters.topologyPrimaryPathCount = pathSummaries.length;
+  candidate.derivedParameters.topologyHub = { xMm: roundTo(hub[0], 0.1), yMm: roundTo(hub[1], 0.1) };
 
   const ribCount = mesh.features.filter((feature) => feature.type === "rib").length;
   const gussetCount = mesh.features.filter((feature) => feature.type === "gusset").length;
@@ -550,9 +705,9 @@ function buildDensitySurfaceMesh(
     bounds: { widthMm: width, heightMm: height, depthMm: depth },
     metadata: {
       candidateId: candidate.id,
-      source: "fenics-density-manufacturable-bracket-reconstruction",
+      source: "fenics-density-compliance-topology-reconstruction",
       boltCount,
-      lighteningHoleCount: Math.max(1, Math.round(stats.openAreaPercent / 14)),
+      lighteningHoleCount: Math.max(1, Math.round(stats.openAreaPercent / 16)),
       ribCount,
       gussetCount,
       diagonalWebCount,
@@ -560,6 +715,356 @@ function buildDensitySurfaceMesh(
     }
   };
 }
+
+type TopologyField = {
+  values: number[][];
+  nx: number;
+  ny: number;
+};
+
+function topologyOptimizeDensityField(
+  density: number[][][],
+  args: {
+    width: number;
+    height: number;
+    boltPositions: Array<[number, number]>;
+    loadPoints: Array<[number, number]>;
+    boltDiameterMm: number;
+    requirements: StructuralBracketRequirements;
+  }
+): TopologyField {
+  const nx = density.length;
+  const ny = density[0]?.length ?? 0;
+  const nz = density[0]?.[0]?.length ?? 1;
+  const projected: number[][] = [];
+
+  for (let x = 0; x < nx; x += 1) {
+    projected[x] = [];
+    for (let y = 0; y < ny; y += 1) {
+      let maxValue = 0;
+      let sum = 0;
+      for (let z = 0; z < nz; z += 1) {
+        const value = Number.isFinite(density[x]?.[y]?.[z]) ? clamp(density[x][y][z], 0, 1) : 0;
+        maxValue = Math.max(maxValue, value);
+        sum += value;
+      }
+      projected[x][y] = clamp(maxValue * 0.72 + (sum / Math.max(nz, 1)) * 0.28, 0, 1);
+    }
+  }
+
+  const smoothed = topologySmooth2d(projected, 3);
+  const loadCenter = averagePoints(args.loadPoints);
+  const boltCenter = averagePoints(args.boltPositions);
+  const requiredLoadBias = clamp(args.requirements.loadCase.forceN / 2500, 0.7, 1.7);
+
+  for (let x = 0; x < nx; x += 1) {
+    for (let y = 0; y < ny; y += 1) {
+      const point = topologyGridToMm(x, y, nx, ny, args.width, args.height);
+      const anchorBoost = Math.max(
+        ...args.boltPositions.map((bolt) => gaussian2d(point, bolt, Math.max(args.boltDiameterMm * 2.4, args.width * 0.05))),
+        ...args.loadPoints.map((load) => gaussian2d(point, load, Math.max(args.boltDiameterMm * 2.1, args.width * 0.05)))
+      );
+      const centerlineDistance = distancePointToSegment2d(point, loadCenter, boltCenter);
+      const compressionBias = Math.exp(-(centerlineDistance * centerlineDistance) / (2 * Math.pow(args.width * 0.18, 2)));
+      smoothed[x][y] = clamp(smoothed[x][y] * 0.72 + anchorBoost * 0.2 + compressionBias * 0.08 * requiredLoadBias, 0, 1);
+    }
+  }
+
+  return { values: topologySmooth2d(smoothed, 2), nx, ny };
+}
+
+function topologySmooth2d(values: number[][], passes: number): number[][] {
+  let current = values.map((row) => [...row]);
+  const nx = current.length;
+  const ny = current[0]?.length ?? 0;
+
+  for (let pass = 0; pass < passes; pass += 1) {
+    const next = current.map((row) => [...row]);
+    for (let x = 0; x < nx; x += 1) {
+      for (let y = 0; y < ny; y += 1) {
+        let sum = 0;
+        let weight = 0;
+        for (let dx = -1; dx <= 1; dx += 1) {
+          for (let dy = -1; dy <= 1; dy += 1) {
+            const xx = x + dx;
+            const yy = y + dy;
+            if (xx < 0 || xx >= nx || yy < 0 || yy >= ny) continue;
+            const localWeight = dx === 0 && dy === 0 ? 4 : dx === 0 || dy === 0 ? 2 : 1;
+            sum += current[xx][yy] * localWeight;
+            weight += localWeight;
+          }
+        }
+        next[x][y] = sum / Math.max(weight, 1);
+      }
+    }
+    current = next;
+  }
+
+  return current;
+}
+
+function topologyFindLoadHub(
+  field: TopologyField,
+  width: number,
+  height: number,
+  boltPositions: Array<[number, number]>,
+  loadPoint: [number, number]
+): [number, number] {
+  const boltCenter = averagePoints(boltPositions);
+  const ideal: [number, number] = [
+    clamp((loadPoint[0] + boltCenter[0]) / 2, -width * 0.18, width * 0.18),
+    clamp(boltCenter[1] + (loadPoint[1] - boltCenter[1]) * 0.56, -height * 0.08, height * 0.22)
+  ];
+  let best = ideal;
+  let bestScore = -Infinity;
+
+  for (let x = Math.floor(field.nx * 0.34); x <= Math.ceil(field.nx * 0.66); x += 1) {
+    for (let y = Math.floor(field.ny * 0.32); y <= Math.ceil(field.ny * 0.72); y += 1) {
+      const point = topologyGridToMm(x, y, field.nx, field.ny, width, height);
+      const densityScore = field.values[x]?.[y] ?? 0;
+      const idealPenalty = distance2d(point[0], point[1], ideal[0], ideal[1]) / Math.max(width, height);
+      const balancePenalty = Math.abs(distance2d(point[0], point[1], loadPoint[0], loadPoint[1]) - averageDistanceToPoints(point, boltPositions)) / Math.max(width, 1);
+      const score = densityScore * 1.8 - idealPenalty * 0.7 - balancePenalty * 0.28;
+      if (score > bestScore) {
+        bestScore = score;
+        best = point;
+      }
+    }
+  }
+
+  return best;
+}
+
+function topologyTraceOptimalPath(
+  field: TopologyField,
+  args: {
+    from: [number, number];
+    to: [number, number];
+    width: number;
+    height: number;
+    preferCompressionArch: boolean;
+    sideBias: number;
+  }
+): Array<[number, number]> {
+  const start = topologyMmToGrid(args.from, field.nx, field.ny, args.width, args.height);
+  const goal = topologyMmToGrid(args.to, field.nx, field.ny, args.width, args.height);
+  const nodeCount = field.nx * field.ny;
+  const dist = new Array<number>(nodeCount).fill(Infinity);
+  const prev = new Array<number>(nodeCount).fill(-1);
+  const visited = new Array<boolean>(nodeCount).fill(false);
+  const indexOf = (x: number, y: number) => y * field.nx + x;
+  const heuristicGoal = topologyGridToMm(goal[0], goal[1], field.nx, field.ny, args.width, args.height);
+  const neighbors = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+    [1, 1],
+    [-1, 1],
+    [1, -1],
+    [-1, -1]
+  ];
+
+  dist[indexOf(start[0], start[1])] = 0;
+
+  for (let iteration = 0; iteration < nodeCount; iteration += 1) {
+    let current = -1;
+    let currentScore = Infinity;
+    for (let index = 0; index < nodeCount; index += 1) {
+      if (!visited[index] && dist[index] < currentScore) {
+        currentScore = dist[index];
+        current = index;
+      }
+    }
+    if (current < 0) break;
+    if (current === indexOf(goal[0], goal[1])) break;
+    visited[current] = true;
+    const x = current % field.nx;
+    const y = Math.floor(current / field.nx);
+    const currentPoint = topologyGridToMm(x, y, field.nx, field.ny, args.width, args.height);
+
+    for (const [dx, dy] of neighbors) {
+      const xx = x + dx;
+      const yy = y + dy;
+      if (xx < 0 || xx >= field.nx || yy < 0 || yy >= field.ny) continue;
+      const nextIndex = indexOf(xx, yy);
+      if (visited[nextIndex]) continue;
+      const nextPoint = topologyGridToMm(xx, yy, field.nx, field.ny, args.width, args.height);
+      const density = field.values[xx]?.[yy] ?? 0;
+      const densityCost = 1.22 - density;
+      const stepCost = Math.hypot(dx, dy);
+      const straightnessPenalty = distancePointToSegment2d(nextPoint, args.from, args.to) / Math.max(args.width, 1);
+      const archPenalty = args.preferCompressionArch
+        ? Math.max(0, (args.from[1] + args.to[1]) / 2 - nextPoint[1]) / Math.max(args.height, 1)
+        : 0;
+      const sidePenalty = Math.max(0, -args.sideBias * (nextPoint[0] - currentPoint[0])) / Math.max(args.width, 1);
+      const heuristic = distance2d(nextPoint[0], nextPoint[1], heuristicGoal[0], heuristicGoal[1]) / Math.max(args.width, args.height);
+      const nextDistance =
+        dist[current] +
+        stepCost * densityCost +
+        straightnessPenalty * 0.34 +
+        archPenalty * 0.22 +
+        sidePenalty * 0.08 +
+        heuristic * 0.05;
+
+      if (nextDistance < dist[nextIndex]) {
+        dist[nextIndex] = nextDistance;
+        prev[nextIndex] = current;
+      }
+    }
+  }
+
+  const path: Array<[number, number]> = [];
+  let cursor = indexOf(goal[0], goal[1]);
+  let guard = 0;
+
+  while (cursor >= 0 && guard < nodeCount) {
+    const x = cursor % field.nx;
+    const y = Math.floor(cursor / field.nx);
+    path.push(topologyGridToMm(x, y, field.nx, field.ny, args.width, args.height));
+    if (cursor === indexOf(start[0], start[1])) break;
+    cursor = prev[cursor];
+    guard += 1;
+  }
+
+  if (path.length < 2) return [args.from, args.to];
+  return path.reverse();
+}
+
+function topologySmoothPath(points: Array<[number, number]>, width: number, height: number): Array<[number, number]> {
+  if (points.length <= 2) return points;
+  const simplified = topologySimplifyPath(points, Math.max(width, height) * 0.025);
+  let current = simplified.map((point) => [...point] as [number, number]);
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    const next: Array<[number, number]> = [current[0]];
+    for (let index = 0; index < current.length - 1; index += 1) {
+      const a = current[index];
+      const b = current[index + 1];
+      next.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25]);
+      next.push([a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]);
+    }
+    next.push(current[current.length - 1]);
+    current = next.map(([x, y]) => [clamp(x, -width / 2, width / 2), clamp(y, -height / 2, height / 2)]);
+  }
+
+  return current;
+}
+
+function topologySimplifyPath(points: Array<[number, number]>, tolerance: number): Array<[number, number]> {
+  if (points.length <= 2) return points;
+  const result: Array<[number, number]> = [points[0]];
+  let anchor = points[0];
+
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const point = points[index];
+    const next = points[index + 1];
+    if (distancePointToSegment2d(point, anchor, next) > tolerance) {
+      result.push(point);
+      anchor = point;
+    }
+  }
+
+  result.push(points[points.length - 1]);
+  return result;
+}
+
+function addTopologyOptimizedMember(
+  mesh: MeshBuilder,
+  options: {
+    id: string;
+    group: string;
+    points: Vec3[];
+    baseRadius: number;
+    minRadius: number;
+    depth: number;
+    width: number;
+    height: number;
+    field: TopologyField;
+    shade: number;
+  }
+) {
+  if (options.points.length < 2) return;
+  const sweptPoints = options.points.map((point, index) => {
+    const density = topologySampleField(options.field, point[0], point[1], options.width, options.height);
+    const t = index / Math.max(options.points.length - 1, 1);
+    const endBlend = 0.8 + Math.sin(Math.PI * t) * 0.28;
+    const radius = Math.max(options.minRadius, options.baseRadius * clamp(0.74 + density * 0.5, 0.72, 1.32) * endBlend);
+    return {
+      point,
+      radiusXy: radius,
+      radiusZ: Math.max(options.depth * 0.18, radius * 1.12),
+      shade: options.shade + density * 0.12
+    };
+  });
+
+  addSweptOrganicTube(mesh, {
+    id: options.id,
+    group: options.group,
+    points: sweptPoints,
+    ringSegments: 18
+  });
+}
+
+function addTopologyShearWeb(
+  mesh: MeshBuilder,
+  options: {
+    id: string;
+    from: [number, number];
+    apex: [number, number];
+    bridge: [number, number];
+    depth: number;
+    shade: number;
+  }
+) {
+  addExtrudedPolygon(mesh, {
+    id: options.id,
+    group: "gusset",
+    points: [options.from, options.apex, options.bridge],
+    z0: -options.depth / 2,
+    z1: options.depth / 2,
+    shade: options.shade
+  });
+}
+
+function topologySampleField(field: TopologyField, xMm: number, yMm: number, widthMm: number, heightMm: number) {
+  const [x, y] = topologyMmToGrid([xMm, yMm], field.nx, field.ny, widthMm, heightMm);
+  return field.values[x]?.[y] ?? 0;
+}
+
+function topologyMmToGrid(point: [number, number], nx: number, ny: number, width: number, height: number): [number, number] {
+  return [
+    clamp(Math.round(((point[0] + width / 2) / Math.max(width, 1)) * (nx - 1)), 0, nx - 1),
+    clamp(Math.round(((point[1] + height / 2) / Math.max(height, 1)) * (ny - 1)), 0, ny - 1)
+  ];
+}
+
+function topologyGridToMm(x: number, y: number, nx: number, ny: number, width: number, height: number): [number, number] {
+  return [-width / 2 + ((x + 0.5) / Math.max(nx, 1)) * width, -height / 2 + ((y + 0.5) / Math.max(ny, 1)) * height];
+}
+
+function gaussian2d(point: [number, number], center: [number, number], sigma: number) {
+  const distance = distance2d(point[0], point[1], center[0], center[1]);
+  return Math.exp(-(distance * distance) / (2 * Math.max(sigma * sigma, 0.0001)));
+}
+
+function distancePointToSegment2d(point: [number, number], start: [number, number], end: [number, number]) {
+  const abx = end[0] - start[0];
+  const aby = end[1] - start[1];
+  const apx = point[0] - start[0];
+  const apy = point[1] - start[1];
+  const lengthSquared = abx * abx + aby * aby;
+  if (lengthSquared <= 0.000001) return distance2d(point[0], point[1], start[0], start[1]);
+  const t = clamp((apx * abx + apy * aby) / lengthSquared, 0, 1);
+  const closest: [number, number] = [start[0] + abx * t, start[1] + aby * t];
+  return distance2d(point[0], point[1], closest[0], closest[1]);
+}
+
+function averageDistanceToPoints(point: [number, number], points: Array<[number, number]>) {
+  if (!points.length) return 0;
+  return points.reduce((sum, current) => sum + distance2d(point[0], point[1], current[0], current[1]), 0) / points.length;
+}
+
 
 type ProductionBracketSkeleton = {
   nodes: DensitySkeletonNode[];
