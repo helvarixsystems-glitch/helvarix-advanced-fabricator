@@ -1,34 +1,52 @@
 import { spawn } from "child_process";
+import path from "path";
 
 export async function runFenicsTopology(input: Record<string, unknown>) {
   return new Promise((resolve, reject) => {
-    const process = spawn("python3", ["services/solver-fenics/topology.py"]);
+    const solverPath = path.join(process.cwd(), "services", "solver-fenics", "topology.py");
+
+    const child = spawn("python3", [solverPath], {
+      cwd: process.cwd(),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
 
     let stdout = "";
     let stderr = "";
 
-    process.stdout.on("data", (data) => {
+    child.stdout.on("data", (data) => {
       stdout += data.toString();
     });
 
-    process.stderr.on("data", (data) => {
+    child.stderr.on("data", (data) => {
       stderr += data.toString();
     });
 
-    process.on("close", (code) => {
+    child.on("error", (error) => {
+      reject(new Error(`Failed to start topology solver at ${solverPath}: ${error.message}`));
+    });
+
+    child.on("close", (code) => {
       if (code !== 0) {
-        reject(new Error(stderr || `FEniCS topology process exited with code ${code}`));
+        reject(
+          new Error(
+            `Topology solver failed with code ${code}. Path: ${solverPath}. stderr: ${stderr || "<empty>"}. stdout: ${stdout || "<empty>"}`
+          )
+        );
         return;
       }
 
       try {
         resolve(JSON.parse(stdout));
       } catch {
-        reject(new Error(`Invalid JSON from FEniCS topology process: ${stdout}`));
+        reject(
+          new Error(
+            `Invalid JSON from topology solver. Path: ${solverPath}. stderr: ${stderr || "<empty>"}. stdout: ${stdout || "<empty>"}`
+          )
+        );
       }
     });
 
-    process.stdin.write(JSON.stringify(input));
-    process.stdin.end();
+    child.stdin.write(JSON.stringify(input));
+    child.stdin.end();
   });
 }
