@@ -364,119 +364,199 @@ function buildMeshFromDensity(args: {
   const ny = density[0]?.length ?? 0;
   const nz = density[0]?.[0]?.length ?? 0;
 
-  if (nx < 2 || ny < 2 || nz < 2) return undefined;
-
-  const solid = (ix: number, iy: number, iz: number): boolean => {
-    if (ix < 0 || iy < 0 || iz < 0 || ix >= nx || iy >= ny || iz >= nz) return false;
-    return density[ix][iy][iz] >= args.threshold;
-  };
+  if (nx < 3 || ny < 3 || nz < 3) return undefined;
 
   const vertices: Vec3[] = [];
   const faces: RenderFace[] = [];
+  const cellVertex = new Map<string, number>();
 
-  const addVertex = (ix: number, iy: number, iz: number): number => {
-    const x = (ix / nx - 0.5) * args.widthMm;
-    const y = (iy / ny - 0.5) * args.heightMm;
-    const z = (iz / nz - 0.5) * args.depthMm;
-    vertices.push([
-      roundTo(x, 0.0001),
-      roundTo(y, 0.0001),
-      roundTo(z, 0.0001),
-    ]);
-    return vertices.length - 1;
+  const key = (ix: number, iy: number, iz: number) => `${ix},${iy},${iz}`;
+
+  const sample = (ix: number, iy: number, iz: number): number => {
+    if (ix < 0 || iy < 0 || iz < 0 || ix >= nx || iy >= ny || iz >= nz) {
+      return 0;
+    }
+
+    return density[ix][iy][iz];
   };
 
-  const addQuad = (
-    corners: Array<[number, number, number]>,
+  const toWorld = (gx: number, gy: number, gz: number): Vec3 => {
+    return [
+      roundTo((gx / Math.max(1, nx - 1) - 0.5) * args.widthMm, 0.0001),
+      roundTo((gy / Math.max(1, ny - 1) - 0.5) * args.heightMm, 0.0001),
+      roundTo((gz / Math.max(1, nz - 1) - 0.5) * args.depthMm, 0.0001),
+    ];
+  };
+
+  const cornerOffsets: Vec3[] = [
+    [0, 0, 0],
+    [1, 0, 0],
+    [1, 1, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+    [1, 0, 1],
+    [1, 1, 1],
+    [0, 1, 1],
+  ];
+
+  const edgePairs: Array<[number, number]> = [
+    [0, 1],
+    [1, 2],
+    [2, 3],
+    [3, 0],
+    [4, 5],
+    [5, 6],
+    [6, 7],
+    [7, 4],
+    [0, 4],
+    [1, 5],
+    [2, 6],
+    [3, 7],
+  ];
+
+  // Surface nets: one relaxed vertex per threshold-crossing grid cell.
+  // This avoids the blocky "one cube per solid voxel" look while still using
+  // the solver density field as the only geometry source.
+  for (let ix = 0; ix < nx - 1; ix += 1) {
+    for (let iy = 0; iy < ny - 1; iy += 1) {
+      for (let iz = 0; iz < nz - 1; iz += 1) {
+        const values = cornerOffsets.map(([ox, oy, oz]) =>
+          sample(ix + ox, iy + oy, iz + oz)
+        );
+
+        const hasSolid = values.some((v) => v >= args.threshold);
+        const hasVoid = values.some((v) => v < args.threshold);
+
+        if (!hasSolid || !hasVoid) continue;
+
+        const crossingPoints: Vec3[] = [];
+
+        for (const [a, b] of edgePairs) {
+          const va = values[a];
+          const vb = values[b];
+
+          if ((va >= args.threshold) === (vb >= args.threshold)) continue;
+
+          const [ax, ay, az] = cornerOffsets[a];
+          const [bx, by, bz] = cornerOffsets[b];
+          const denom = vb - va;
+          const t =
+            Math.abs(denom) < 1e-9
+              ? 0.5
+              : Math.max(0, Math.min(1, (args.threshold - va) / denom));
+
+          crossingPoints.push([
+            ix + ax + (bx - ax) * t,
+            iy + ay + (by - ay) * t,
+            iz + az + (bz - az) * t,
+          ]);
+        }
+
+        if (crossingPoints.length === 0) continue;
+
+        const avg = crossingPoints.reduce<Vec3>(
+          (acc, p) => [acc[0] + p[0], acc[1] + p[1], acc[2] + p[2]],
+          [0, 0, 0]
+        );
+
+        const n = crossingPoints.length;
+        const world = toWorld(avg[0] / n, avg[1] / n, avg[2] / n);
+
+        vertices.push(world);
+        cellVertex.set(key(ix, iy, iz), vertices.length - 1);
+      }
+    }
+  }
+
+  const getCellVertex = (
+    ix: number,
+    iy: number,
+    iz: number
+  ): number | undefined => {
+    return cellVertex.get(key(ix, iy, iz));
+  };
+
+  const addFace = (
+    indices: Array<number | undefined>,
     group: string,
     shade: number
   ) => {
-    const indices = corners.map(([x, y, z]) => addVertex(x, y, z));
-    faces.push({ indices, group, shade });
+    if (indices.some((idx) => idx === undefined)) return;
+
+    const clean = indices as number[];
+    if (new Set(clean).size < 3) return;
+
+    faces.push({
+      indices: clean,
+      group,
+      shade,
+    });
   };
 
-  for (let ix = 0; ix < nx; ix += 1) {
-    for (let iy = 0; iy < ny; iy += 1) {
-      for (let iz = 0; iz < nz; iz += 1) {
-        if (!solid(ix, iy, iz)) continue;
+  // Connect the surface-net vertices around every crossing grid edge.
+  // Each crossing edge produces one quad from its four neighboring cells.
+  for (let ix = 0; ix < nx - 1; ix += 1) {
+    for (let iy = 1; iy < ny - 1; iy += 1) {
+      for (let iz = 1; iz < nz - 1; iz += 1) {
+        const a = sample(ix, iy, iz);
+        const b = sample(ix + 1, iy, iz);
 
-        if (!solid(ix - 1, iy, iz)) {
-          addQuad(
-            [
-              [ix, iy, iz],
-              [ix, iy, iz + 1],
-              [ix, iy + 1, iz + 1],
-              [ix, iy + 1, iz],
-            ],
-            "solver-density-x-negative",
-            0.74
-          );
-        }
+        if ((a >= args.threshold) === (b >= args.threshold)) continue;
 
-        if (!solid(ix + 1, iy, iz)) {
-          addQuad(
-            [
-              [ix + 1, iy, iz],
-              [ix + 1, iy + 1, iz],
-              [ix + 1, iy + 1, iz + 1],
-              [ix + 1, iy, iz + 1],
-            ],
-            "solver-density-x-positive",
-            0.82
-          );
-        }
+        addFace(
+          [
+            getCellVertex(ix, iy - 1, iz - 1),
+            getCellVertex(ix, iy, iz - 1),
+            getCellVertex(ix, iy, iz),
+            getCellVertex(ix, iy - 1, iz),
+          ],
+          "solver-surface-net-x",
+          0.82
+        );
+      }
+    }
+  }
 
-        if (!solid(ix, iy - 1, iz)) {
-          addQuad(
-            [
-              [ix, iy, iz],
-              [ix + 1, iy, iz],
-              [ix + 1, iy, iz + 1],
-              [ix, iy, iz + 1],
-            ],
-            "solver-density-y-negative",
-            0.70
-          );
-        }
+  for (let ix = 1; ix < nx - 1; ix += 1) {
+    for (let iy = 0; iy < ny - 1; iy += 1) {
+      for (let iz = 1; iz < nz - 1; iz += 1) {
+        const a = sample(ix, iy, iz);
+        const b = sample(ix, iy + 1, iz);
 
-        if (!solid(ix, iy + 1, iz)) {
-          addQuad(
-            [
-              [ix, iy + 1, iz],
-              [ix, iy + 1, iz + 1],
-              [ix + 1, iy + 1, iz + 1],
-              [ix + 1, iy + 1, iz],
-            ],
-            "solver-density-y-positive",
-            0.88
-          );
-        }
+        if ((a >= args.threshold) === (b >= args.threshold)) continue;
 
-        if (!solid(ix, iy, iz - 1)) {
-          addQuad(
-            [
-              [ix, iy, iz],
-              [ix, iy + 1, iz],
-              [ix + 1, iy + 1, iz],
-              [ix + 1, iy, iz],
-            ],
-            "solver-density-z-negative",
-            0.68
-          );
-        }
+        addFace(
+          [
+            getCellVertex(ix - 1, iy, iz - 1),
+            getCellVertex(ix - 1, iy, iz),
+            getCellVertex(ix, iy, iz),
+            getCellVertex(ix, iy, iz - 1),
+          ],
+          "solver-surface-net-y",
+          0.88
+        );
+      }
+    }
+  }
 
-        if (!solid(ix, iy, iz + 1)) {
-          addQuad(
-            [
-              [ix, iy, iz + 1],
-              [ix + 1, iy, iz + 1],
-              [ix + 1, iy + 1, iz + 1],
-              [ix, iy + 1, iz + 1],
-            ],
-            "solver-density-z-positive",
-            0.92
-          );
-        }
+  for (let ix = 1; ix < nx - 1; ix += 1) {
+    for (let iy = 1; iy < ny - 1; iy += 1) {
+      for (let iz = 0; iz < nz - 1; iz += 1) {
+        const a = sample(ix, iy, iz);
+        const b = sample(ix, iy, iz + 1);
+
+        if ((a >= args.threshold) === (b >= args.threshold)) continue;
+
+        addFace(
+          [
+            getCellVertex(ix - 1, iy - 1, iz),
+            getCellVertex(ix, iy - 1, iz),
+            getCellVertex(ix, iy, iz),
+            getCellVertex(ix - 1, iy, iz),
+          ],
+          "solver-surface-net-z",
+          0.76
+        );
       }
     }
   }
@@ -497,11 +577,12 @@ function buildMeshFromDensity(args: {
     },
     metadata: {
       candidateId: args.candidateId,
-      source: "fenics-density-surface-extraction",
+      source: "fenics-density-surface-nets",
       fakeGeometryDisabled: true,
       threshold: args.threshold,
       densityGrid: { nx, ny, nz },
       boltCount: args.boltCount,
+      extractionMethod: "surface-nets",
       solverMetadata: args.rawMetadata ?? {},
     },
   };
