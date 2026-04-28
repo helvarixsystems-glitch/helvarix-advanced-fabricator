@@ -7,7 +7,6 @@ import type {
   GenerationInput,
   GenerationResult,
   RenderableMesh,
-  RenderableMeshFeature,
   StructuralBracketRequirements,
   ValidationMessage,
   Vec3
@@ -19,12 +18,36 @@ declare const process:
     }
   | undefined;
 
-const DEFAULT_FENICS_SOLVER_URL = "https://helvarix-solver-worker.onrender.com";
-const DENSITY_THRESHOLD = 0.5;
+const DEFAULT_SOLVER_URL = "https://helvarix-solver-worker.onrender.com";
+const SOLVER_TIMEOUT_MS = 45_000;
+
+type SolverMeshResponse = {
+  ok?: boolean;
+  status?: string;
+  engine?: string;
+  route?: string;
+  error?: string;
+  message?: string;
+  mesh?: unknown;
+  renderMesh?: unknown;
+  metrics?: Record<string, unknown>;
+  candidateId?: string;
+};
+
+type SolverMeshCandidate = {
+  candidate: CandidateGeometry;
+  renderMesh: RenderableMesh;
+  solverResponse: SolverMeshResponse;
+};
 
 export async function generateComponent(input: GenerationInput): Promise<GenerationResult> {
   if (input.componentFamily === "bell-nozzle") {
-    return generateBellNozzle(input.requirements);
+    return createNoGeometryResult({
+      family: input.componentFamily,
+      requirements: normalizeBellNozzleRequirements(input.requirements),
+      reason: "Bell-nozzle generation is disabled until it is connected to a real solver-derived geometry pipeline.",
+      solverError: "UNSUPPORTED_COMPONENT_SOLVER_PIPELINE"
+    });
   }
 
   return generateStructuralPart(
@@ -35,180 +58,77 @@ export async function generateComponent(input: GenerationInput): Promise<Generat
 
 export const runGeneration = generateComponent;
 
-type StructuralMaterial = {
-  name: string;
-  densityGcc: number;
-  allowableStressMpa: number;
-  elasticModulusMpa: number;
-};
-
-type StructuralMode =
-  | "minimum-mass-density"
-  | "balanced-density"
-  | "stiffness-density"
-  | "vibration-density";
-
-type StructuralDesignParameters = {
-  mode: StructuralMode;
-  material: StructuralMaterial;
-  thicknessFactor: number;
-  targetOpenAreaPercent: number;
-};
-
-type FenicsDensityResult = {
-  ok?: boolean;
-  engine?: string;
-  density?: number[][][];
-  error?: string;
-  message?: string;
-  route?: string;
-};
-
-type DensityStats = {
-  nx: number;
-  ny: number;
-  nz: number;
-  solidVoxels: number;
-  totalVoxels: number;
-  solidFraction: number;
-  openAreaPercent: number;
-  averageDensity: number;
-};
-
-type MeshBuilder = {
-  vertices: Vec3[];
-  faces: RenderableMesh["faces"];
-  features: RenderableMeshFeature[];
-};
-
-function normalizeStructuralRequirements(requirements: StructuralBracketRequirements): StructuralBracketRequirements {
-  const safeBoltDiameter = clamp(finiteOr(requirements.mounting.boltDiameterMm, 6), 2, 40);
-  const safeBoltCount = Math.round(clamp(finiteOr(requirements.mounting.boltCount, 4), 1, 12));
-  const minimumSpacing = safeBoltDiameter * 2.6;
-  const safeSpacing = Math.max(finiteOr(requirements.mounting.spacingMm, minimumSpacing), minimumSpacing);
-  const safeEnvelopeWidth = Math.max(finiteOr(requirements.envelope.maxWidthMm, 140), safeSpacing + safeBoltDiameter * 4.2);
-  const safeEnvelopeHeight = Math.max(finiteOr(requirements.envelope.maxHeightMm, 120), safeBoltDiameter * 8);
-  const safeEnvelopeDepth = Math.max(finiteOr(requirements.envelope.maxDepthMm, 36), safeBoltDiameter * 3.25);
-  const safeWall = clamp(finiteOr(requirements.manufacturing.minWallThicknessMm, 2.4), 0.8, safeEnvelopeDepth * 0.42);
-
-  return {
-    ...requirements,
-    loadCase: {
-      ...requirements.loadCase,
-      forceN: Math.max(finiteOr(requirements.loadCase.forceN, 1000), 1),
-      vibrationHz: requirements.loadCase.vibrationHz === undefined
-        ? undefined
-        : Math.max(finiteOr(requirements.loadCase.vibrationHz, 0), 0)
-    },
-    safetyFactor: clamp(finiteOr(requirements.safetyFactor, 1.5), 1, 6),
-    mounting: {
-      ...requirements.mounting,
-      boltCount: safeBoltCount,
-      boltDiameterMm: safeBoltDiameter,
-      spacingMm: safeSpacing
-    },
-    envelope: {
-      ...requirements.envelope,
-      maxWidthMm: safeEnvelopeWidth,
-      maxHeightMm: safeEnvelopeHeight,
-      maxDepthMm: safeEnvelopeDepth
-    },
-    manufacturing: {
-      ...requirements.manufacturing,
-      minWallThicknessMm: safeWall,
-      maxOverhangDeg: clamp(finiteOr(requirements.manufacturing.maxOverhangDeg, 45), 15, 90)
-    },
-    objectives: {
-      ...requirements.objectives,
-      targetMassKg: requirements.objectives.targetMassKg === undefined
-        ? undefined
-        : Math.max(finiteOr(requirements.objectives.targetMassKg, 0.1), 0.001),
-      targetOpenAreaPercent: requirements.objectives.targetOpenAreaPercent === undefined
-        ? requirements.objectives.targetOpenAreaPercent
-        : clamp(finiteOr(requirements.objectives.targetOpenAreaPercent, 50), 10, 82)
-    }
-  };
-}
-
 async function generateStructuralPart(
   family: ComponentFamily,
   requirements: StructuralBracketRequirements
 ): Promise<GenerationResult> {
-  const filteredCandidates = buildStructuralCandidates(family, requirements, true);
-  const baselineCandidates = buildStructuralCandidates(family, requirements, false);
+  const candidate = buildSingleAuthoritativeCandidate(family, requirements);
+  const localConstraintErrors = validatePreSolverConstraints(requirements, candidate);
 
-  const accepted = filteredCandidates
-    .filter((candidate) => !candidate.rejected)
-    .sort((a, b) => b.totalScore - a.totalScore);
+  if (localConstraintErrors.length > 0) {
+    return createNoGeometryResult({
+      family,
+      requirements,
+      candidate,
+      reason:
+        "No geometry produced. The request failed local pre-solver manufacturability or structural screening, so no viewer mesh was created.",
+      solverError: localConstraintErrors.join("; "),
+      rejectedCandidates: [
+        {
+          ...candidate,
+          rejected: true,
+          rejectionReasons: localConstraintErrors
+        }
+      ]
+    });
+  }
 
-  const rejected = filteredCandidates.filter((candidate) => candidate.rejected);
+  const solverResult = await requestAuthoritativeSolverMesh(requirements, candidate);
 
-  const selectedWithoutMesh =
-    accepted[0] ??
-    [...filteredCandidates].sort((a, b) => b.totalScore - a.totalScore)[0] ??
-    createEmergencyStructuralCandidate(family, requirements);
+  if (!solverResult) {
+    return createNoGeometryResult({
+      family,
+      requirements,
+      candidate,
+      reason:
+        "No geometry produced. The configured solver did not return a valid mesh, and fake TypeScript preview geometry is intentionally disabled.",
+      solverError:
+        "Expected a solver-derived mesh from /topology/optimize or /topology/mesh. Density-only responses are not accepted as display geometry.",
+      rejectedCandidates: [
+        {
+          ...candidate,
+          rejected: true,
+          rejectionReasons: [
+            "NO_SOLVER_MESH_RETURNED",
+            "FAKE_GEOMETRY_DISABLED"
+          ]
+        }
+      ]
+    });
+  }
 
   const selected: CandidateGeometry = {
-    ...selectedWithoutMesh,
-    renderMesh: await buildStructuralRenderMesh(selectedWithoutMesh, requirements)
+    ...solverResult.candidate,
+    rejected: false,
+    rejectionReasons: [],
+    renderMesh: solverResult.renderMesh,
+    derivedParameters: {
+      ...solverResult.candidate.derivedParameters,
+      geometrySource: "authoritative-solver-mesh",
+      solverEngine: solverResult.solverResponse.engine ?? "unknown",
+      solverRoute: solverResult.solverResponse.route ?? "topology-mesh",
+      fakeGeometryDisabled: true
+    }
   };
 
-  const reviewedBaseline = baselineCandidates
-    .map((candidate) => {
-      const rejectionReasons = evaluateStructuralCandidateForReview(candidate, requirements);
-      return {
-        ...candidate,
-        rejected: rejectionReasons.length > 0,
-        rejectionReasons
-      };
-    })
-    .sort((a, b) => b.totalScore - a.totalScore);
-
-  const baselineRejectedAfterReview = reviewedBaseline.filter((candidate) => candidate.rejected);
-  const selectedBaseline = reviewedBaseline[0];
-
-  const baselineComparison: BaselineComparison = {
-    baselineCandidatesGenerated: baselineCandidates.length,
-    baselineCandidatesSimulated: baselineCandidates.length,
-    baselineCandidatesRejectedAfterReview: baselineRejectedAfterReview.length,
-    filteredCandidatesGenerated: filteredCandidates.length,
-    filteredCandidatesRejectedBeforeSimulation: rejected.length,
-    filteredCandidatesSimulated: accepted.length,
-    avoidedSimulationRuns: Math.max(0, baselineCandidates.length - accepted.length),
-    reductionInSimulationLoadPercent: roundTo(
-      baselineCandidates.length > 0
-        ? ((baselineCandidates.length - accepted.length) / baselineCandidates.length) * 100
-        : 0,
-      0.1
-    ),
-    selectedBaselineCandidateId: selectedBaseline?.id,
-    selectedFilteredCandidateId: selected.id,
-    selectedBaselineCandidateWasRejected: selectedBaseline?.rejected ?? false
-  };
-
-  const derived: DerivedGeometry = {
-    widthMm: selected.widthMm,
-    heightMm: selected.heightMm,
-    depthMm: selected.depthMm,
-    lengthMm: selected.lengthMm,
-    wallThicknessMm: selected.wallThicknessMm,
-    material: selected.material,
-    estimatedMassKg: selected.estimatedMassKg,
-    selectedCandidateId: selected.id,
-    skeletonized: selected.skeletonized,
-    skeletonizationPolicy: selected.skeletonizationPolicy,
-    openAreaPercent: selected.openAreaPercent,
-    latticeCellCount: selected.latticeCellCount,
-    loadPathContinuityScore: selected.loadPathContinuityScore,
-    renderMesh: selected.renderMesh,
-    derivedParameters: selected.derivedParameters
-  };
+  const derived: DerivedGeometry = buildDerivedGeometry(selected, solverResult.renderMesh);
+  const baselineComparison = buildBaselineComparison(selected.id, 1, 0, 1);
 
   return {
-    revision: "REQ-GEN-009-CONSTRAINT-FILTERED-PRODUCTION-BRACKET",
+    revision: "REQ-GEN-010-AUTHORITATIVE-SOLVER-MESH-ONLY",
     exportState: "idle",
     estimatedMassKg: selected.estimatedMassKg,
-    estimatedBurn: estimateComputeBurn(filteredCandidates.length, accepted.length),
+    estimatedBurn: 1,
     geometry: {
       silhouette: family,
       material: selected.material,
@@ -217,308 +137,106 @@ async function generateStructuralPart(
       heightMm: selected.heightMm,
       depthMm: selected.depthMm,
       wallThicknessMm: selected.wallThicknessMm,
-      skeletonized: selected.skeletonized,
-      skeletonizationPolicy: selected.skeletonizationPolicy,
+      skeletonized: true,
+      skeletonizationPolicy: "fenics-density",
       openAreaPercent: selected.openAreaPercent,
-      latticeCellCount: selected.latticeCellCount,
       loadPathContinuityScore: selected.loadPathContinuityScore,
-      renderMesh: selected.renderMesh,
+      renderMesh: solverResult.renderMesh,
       derived,
       candidates: {
-        evaluated: filteredCandidates.length,
-        accepted: accepted.length,
-        rejected: rejected.length,
+        evaluated: 1,
+        accepted: 1,
+        rejected: 0,
         bestCandidateId: selected.id
       },
       notes: [
-        `${filteredCandidates.length} FEniCS-ready constraint candidates were generated and scored.`,
-        `${rejected.length} candidates were rejected before topology solve by envelope, manufacturability, and safety filters.`,
-        `${accepted.length} candidates advanced to FEniCS density-field geometry generation.`,
-        `Selected candidate ${selected.id} with total score ${selected.totalScore.toFixed(1)}/100.`,
-        `Selected geometry uses ${requirements.mounting.boltCount} bolt hole${requirements.mounting.boltCount === 1 ? "" : "s"} from the input requirements.`,
-        `Geometry source: ${String(selected.derivedParameters.geometrySource ?? "unknown")}. Density-field iso-surface reconstruction is used for production-facing preview geometry.`,
-        `Estimated mass is ${selected.estimatedMassKg.toFixed(3)} kg with estimated safety factor ${selected.safetyFactorEstimate.toFixed(2)}.`
+        "Authoritative solver mesh received. Viewer geometry is solver-derived, not hand-built TypeScript preview geometry.",
+        "Fake decorative fallback geometry is disabled in this generation engine.",
+        `Solver engine: ${String(solverResult.solverResponse.engine ?? "unknown")}.`,
+        `Mesh: ${solverResult.renderMesh.vertices.length} vertices, ${solverResult.renderMesh.faces.length} faces.`
       ]
     },
-    validations: buildStructuralValidations(requirements, selected, accepted.length, baselineComparison),
+    validations: [
+      {
+        severity: "success",
+        title: "Solver geometry produced",
+        text:
+          "The generation result includes a valid solver-derived renderMesh. This is the only geometry source accepted by this engine."
+      },
+      {
+        severity: "success",
+        title: "Presentation fallback disabled",
+        text:
+          "The generation engine no longer constructs decorative bracket geometry when the solver fails."
+      }
+    ],
     derived,
-    candidatesEvaluated: filteredCandidates.length,
-    candidatesAccepted: accepted.length,
-    candidatesRejected: rejected.length,
+    candidatesEvaluated: 1,
+    candidatesAccepted: 1,
+    candidatesRejected: 0,
     selectedCandidate: selected,
-    rejectedCandidates: rejected.slice(0, 30),
+    rejectedCandidates: [],
     baselineComparison,
     fabricationReview: {
       supportRemovalDifficulty: "unknown",
       notes:
-        "Fabrication review placeholder. Next step is exporting the FEniCS density mesh to STL and validating it in Gmsh/CalculiX."
+        "Fabrication review should be completed after Gmsh/CalculiX validation and export of the solver-derived STL/mesh artifacts."
     }
   };
 }
 
-function buildStructuralCandidates(
-  family: ComponentFamily,
+async function requestAuthoritativeSolverMesh(
   requirements: StructuralBracketRequirements,
-  applyConstraintFiltering: boolean
-): CandidateGeometry[] {
-  const candidates: CandidateGeometry[] = [];
-  const designSpace = buildStructuralDesignSpace(requirements);
-  const loadMultiplier =
-    requirements.loadCase.direction === "multi-axis"
-      ? 1.35
-      : requirements.loadCase.direction === "lateral"
-        ? 1.18
-        : 1;
-  const vibrationMultiplier = requirements.loadCase.vibrationHz
-    ? 1 + Math.min(requirements.loadCase.vibrationHz / 500, 0.45)
-    : 1;
-  const requiredLoadN = requirements.loadCase.forceN * requirements.safetyFactor * loadMultiplier * vibrationMultiplier;
-  const boltFitWidth = requirements.mounting.spacingMm + requirements.mounting.boltDiameterMm * 4.2;
+  candidate: CandidateGeometry
+): Promise<SolverMeshCandidate | undefined> {
+  const solverUrl = getSolverUrl();
+  if (!solverUrl) return undefined;
 
-  let index = 0;
+  const payload = buildTopologySolverPayload(requirements, candidate);
+  const endpoints = ["/topology/optimize", "/topology/mesh"];
 
-  for (const params of designSpace) {
-    index += 1;
+  for (const endpoint of endpoints) {
+    const response = await postToSolver(`${solverUrl.replace(/\/$/, "")}${endpoint}`, payload);
+    const mesh = coerceRenderableMesh(response, candidate, requirements);
 
-    const wallThicknessMm = roundTo(requirements.manufacturing.minWallThicknessMm * params.thicknessFactor, 0.1);
-    const widthMm = clamp(
-      Math.max(boltFitWidth, requirements.envelope.maxWidthMm * widthFactorForMode(params.mode)),
-      requirements.mounting.boltDiameterMm * 5,
-      requirements.envelope.maxWidthMm
-    );
-    const heightMm = clamp(
-      requirements.envelope.maxHeightMm * heightFactorForMode(params.mode),
-      requirements.mounting.boltDiameterMm * 4.5,
-      requirements.envelope.maxHeightMm
-    );
-    const depthMm = clamp(
-      requirements.envelope.maxDepthMm * (0.36 + params.thicknessFactor * 0.08),
-      requirements.mounting.boltDiameterMm * 3.25,
-      requirements.envelope.maxDepthMm
-    );
+    if (mesh) {
+      const metrics = isRecord(response?.metrics) ? response.metrics : {};
+      const updatedCandidate = applySolverMetrics(candidate, metrics, mesh);
 
-    const topologyEfficiency = topologyEfficiencyForMode(params.mode, requirements);
-    const sectionAreaMm2 = Math.max(wallThicknessMm * (widthMm * 0.38 + heightMm * 0.34), 1);
-    const loadCapacityN =
-      sectionAreaMm2 *
-      params.material.allowableStressMpa *
-      topologyEfficiency *
-      clamp(1 - params.targetOpenAreaPercent / 185, 0.5, 0.88);
-    const safetyFactorEstimate = loadCapacityN / Math.max(requirements.loadCase.forceN, 1);
-    const achievedSafetyRatio = safetyFactorEstimate / Math.max(requirements.safetyFactor, 0.1);
-    const estimatedStressMpa = requiredLoadN / Math.max(sectionAreaMm2 * topologyEfficiency, 1);
-    const estimatedDisplacementMm =
-      (requirements.loadCase.forceN * Math.pow(heightMm, 2)) /
-      Math.max(params.material.elasticModulusMpa * sectionAreaMm2 * topologyEfficiency * 110, 1);
-
-    const solidFraction = clamp(1 - params.targetOpenAreaPercent / 100, 0.18, 0.72);
-    const grossVolumeMm3 = widthMm * heightMm * depthMm;
-    const estimatedVolumeMm3 = grossVolumeMm3 * (solidFraction * 0.34 + 0.04);
-    const estimatedMassKg = (estimatedVolumeMm3 / 1_000_000) * params.material.densityGcc;
-    const minimumViableMassKg = Math.max(0.035, requiredLoadN / Math.max(params.material.allowableStressMpa * 48_000, 1));
-
-    const massScore = clamp(112 - (estimatedMassKg / Math.max(minimumViableMassKg * 3.4, 0.001)) * 28, 0, 100);
-    const strengthScore = achievedSafetyRatio < 1
-      ? clamp(achievedSafetyRatio * 78, 0, 78)
-      : clamp(104 - Math.max(0, achievedSafetyRatio - 1.32) * 13, 72, 104);
-    const stiffnessScore = clamp(100 - estimatedDisplacementMm * 32, 0, 100);
-    const manufacturabilityScore = clamp(
-      100 -
-        Math.max(0, wallThicknessMm - requirements.manufacturing.minWallThicknessMm * 2.2) * 5 -
-        (requirements.manufacturing.supportAllowed ? 2 : 12) -
-        Math.max(0, 45 - requirements.manufacturing.maxOverhangDeg) * 0.9,
-      0,
-      100
-    );
-    const densityFitScore = densityModeFitScore(params.mode, requirements);
-    const materialPenalty = clamp(Math.max(0, params.material.densityGcc - 4.6) * 5, 0, 22);
-    const overSafetyPenalty = clamp(Math.max(0, achievedSafetyRatio - 1.85) * 8, 0, 28);
-    const lowSafetyPenalty = achievedSafetyRatio < 1 ? 32 : 0;
-
-    const performanceScore = weightedAverage([
-      [massScore, 0.26],
-      [strengthScore, 0.23],
-      [densityFitScore, 0.2],
-      [stiffnessScore, 0.15],
-      [manufacturabilityScore, 0.16]
-    ]);
-
-    const totalScore = clamp(
-      weightedAverage([
-        [performanceScore, 0.42],
-        [massScore, 0.22],
-        [strengthScore, 0.2],
-        [densityFitScore, 0.1],
-        [manufacturabilityScore, 0.06]
-      ]) - materialPenalty - overSafetyPenalty - lowSafetyPenalty,
-      0,
-      100
-    );
-
-    const candidate: CandidateGeometry = {
-      id: `${applyConstraintFiltering ? "filtered" : "baseline"}_${family.replace(/[^a-z0-9]/gi, "-")}_cand_${String(index).padStart(3, "0")}`,
-      family,
-      material: params.material.name,
-      widthMm: roundTo(widthMm, 0.1),
-      heightMm: roundTo(heightMm, 0.1),
-      depthMm: roundTo(depthMm, 0.1),
-      lengthMm: roundTo(Math.max(widthMm, heightMm), 0.1),
-      wallThicknessMm,
-      estimatedMassKg: roundTo(estimatedMassKg, 0.001),
-      estimatedStressMpa: roundTo(estimatedStressMpa, 0.01),
-      estimatedDisplacementMm: roundTo(estimatedDisplacementMm, 0.0001),
-      safetyFactorEstimate: roundTo(safetyFactorEstimate, 0.01),
-      manufacturabilityScore: roundTo(manufacturabilityScore, 0.1),
-      supportBurdenScore: roundTo(manufacturabilityScore, 0.1),
-      performanceScore: roundTo(performanceScore, 0.1),
-      totalScore: roundTo(totalScore, 0.1),
-      rejected: false,
-      rejectionReasons: [],
-      skeletonized: true,
-      skeletonizationPolicy: "fenics-density",
-      openAreaPercent: roundTo(params.targetOpenAreaPercent, 0.1),
-      latticeCellCount: 0,
-      loadPathContinuityScore: roundTo(densityFitScore, 0.1),
-      derivedParameters: {
-        topologyMode: params.mode,
-        geometrySource: "fenics-density-field",
-        targetOpenAreaPercent: params.targetOpenAreaPercent,
-        optimizationObjective: "minimum viable mass using FEniCS density field",
-        achievedSafetyRatio: roundTo(achievedSafetyRatio, 0.01),
-        minimumViableMassKg: roundTo(minimumViableMassKg, 0.001),
-        requiredLoadN: roundTo(requiredLoadN, 0.1),
-        loadDirection: requirements.loadCase.direction,
-        vibrationHz: requirements.loadCase.vibrationHz ?? 0,
-        manufacturingProcess: requirements.manufacturing.process,
-        supportAllowed: requirements.manufacturing.supportAllowed,
-        boltCount: requirements.mounting.boltCount,
-        boltDiameterMm: requirements.mounting.boltDiameterMm,
-        boltSpacingMm: requirements.mounting.spacingMm,
-        overhangLimitDeg: requirements.manufacturing.maxOverhangDeg,
-        baselineMode: !applyConstraintFiltering
-      }
-    };
-
-    const rejectionReasons = applyConstraintFiltering ? evaluateStructuralCandidateForReview(candidate, requirements) : [];
-
-    candidates.push({
-      ...candidate,
-      rejected: rejectionReasons.length > 0,
-      rejectionReasons
-    });
-  }
-
-  return candidates;
-}
-
-function buildStructuralDesignSpace(requirements: StructuralBracketRequirements): StructuralDesignParameters[] {
-  const materials = selectStructuralMaterialOptions(requirements);
-  const modes: StructuralMode[] = [
-    "minimum-mass-density",
-    "balanced-density",
-    "stiffness-density",
-    ...(requirements.loadCase.vibrationHz && requirements.loadCase.vibrationHz > 60 ? ["vibration-density" as StructuralMode] : [])
-  ];
-  const targetOpenAreaBase = requirements.objectives.targetOpenAreaPercent ??
-    (requirements.objectives.priority === "lightweight" ? 58 : 46);
-  const targetOpenAreas = [
-    clamp(targetOpenAreaBase - 8, 28, 72),
-    clamp(targetOpenAreaBase, 32, 78),
-    clamp(targetOpenAreaBase + 8, 38, 82)
-  ];
-  const thicknessFactors = requirements.objectives.priority === "lightweight"
-    ? [0.95, 1.1, 1.28]
-    : requirements.objectives.priority === "stiffness"
-      ? [1.1, 1.28, 1.48]
-      : [1, 1.18, 1.38];
-  const designSpace: StructuralDesignParameters[] = [];
-
-  for (const material of materials) {
-    for (const mode of modes) {
-      for (const thicknessFactor of thicknessFactors) {
-        for (const targetOpenAreaPercent of targetOpenAreas) {
-          designSpace.push({ mode, material, thicknessFactor, targetOpenAreaPercent });
+      return {
+        candidate: updatedCandidate,
+        renderMesh: mesh,
+        solverResponse: {
+          ...(response ?? {}),
+          route: endpoint
         }
-      }
+      };
     }
   }
 
-  return designSpace;
+  return undefined;
 }
 
-async function buildStructuralRenderMesh(
-  candidate: CandidateGeometry,
-  requirements: StructuralBracketRequirements
-): Promise<RenderableMesh> {
-  const targetOpenAreaPercent = numberParam(candidate, "targetOpenAreaPercent", candidate.openAreaPercent ?? 50);
-  const fenics = await fetchFenicsDensity({
-    nx: 48,
-    ny: 48,
-    nz: 14,
-    loadDirection: requirements.loadCase.direction,
-    boltCount: requirements.mounting.boltCount,
-    targetOpenAreaPercent,
-    safetyFactor: requirements.safetyFactor,
-    forceN: requirements.loadCase.forceN,
-    maxIterations: 35
-  });
-
-  const density = fenics?.density && isValidDensityField(fenics.density)
-    ? fenics.density
-    : buildEmergencyOrganicDensityField(candidate, requirements, { nx: 48, ny: 48, nz: 14 });
-
-  if (!fenics?.density || !isValidDensityField(fenics.density)) {
-    candidate.derivedParameters.fenicsStatus = "fallback-organic-density";
-    candidate.derivedParameters.fenicsError = fenics?.error ?? fenics?.message ?? "No valid density field returned by solver.";
-    candidate.derivedParameters.fenicsEngine = fenics?.engine ?? "local-organic-density-fallback";
-  }
-
-  const stats = summarizeDensity(density);
-  if (fenics?.density && isValidDensityField(fenics.density)) {
-    candidate.derivedParameters.fenicsStatus = "connected";
-  }
-  candidate.derivedParameters.fenicsEngine = fenics?.engine ?? String(candidate.derivedParameters.fenicsEngine ?? "unknown");
-  candidate.derivedParameters.fenicsGrid = `${stats.nx}x${stats.ny}x${stats.nz}`;
-  candidate.derivedParameters.fenicsSolidFraction = roundTo(stats.solidFraction, 0.001);
-  candidate.derivedParameters.fenicsAverageDensity = roundTo(stats.averageDensity, 0.001);
-  candidate.derivedParameters.fenicsOpenAreaPercent = roundTo(stats.openAreaPercent, 0.1);
-
-  return buildDensitySurfaceMesh(candidate, requirements, density, stats);
-}
-
-async function fetchFenicsDensity(input: {
-  nx: number;
-  ny: number;
-  nz: number;
-  loadDirection: string;
-  boltCount: number;
-  targetOpenAreaPercent: number;
-  safetyFactor: number;
-  forceN: number;
-  maxIterations?: number;
-}): Promise<FenicsDensityResult | undefined> {
-  const solverUrl = getFenicsSolverUrl();
-
-  if (!solverUrl) {
-    return { ok: false, error: "No FEniCS solver URL configured." };
-  }
-
+async function postToSolver(url: string, payload: unknown): Promise<SolverMeshResponse | undefined> {
   const controller = new AbortController();
-  const timeoutMs = 8500;
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(), SOLVER_TIMEOUT_MS);
 
   try {
-    const response = await fetch(`${solverUrl.replace(/\/$/, "")}/fenics-test`, {
+    const response = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(input),
+      body: JSON.stringify(payload),
       signal: controller.signal
     });
 
-    const data = (await response.json().catch(() => ({}))) as FenicsDensityResult;
+    const data = (await response.json().catch(() => ({}))) as SolverMeshResponse;
 
     if (!response.ok) {
-      return { ok: false, error: data.error ?? data.message ?? `FEniCS solver returned HTTP ${response.status}` };
+      return {
+        ok: false,
+        error: data.error ?? data.message ?? `Solver returned HTTP ${response.status}`,
+        route: url
+      };
     }
 
     return data;
@@ -526,2113 +244,341 @@ async function fetchFenicsDensity(input: {
     const message = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
-      error: message.includes("abort") || message.includes("Abort")
-        ? `FEniCS solver timed out after ${timeoutMs} ms; using local organic topology fallback.`
-        : message
+      error: message,
+      route: url
     };
   } finally {
     clearTimeout(timeout);
   }
 }
 
-function getFenicsSolverUrl() {
-  const processEnv = typeof process !== "undefined" ? process.env : undefined;
-  return processEnv?.HELVARIX_SOLVER_URL?.trim() || processEnv?.VITE_HELVARIX_SOLVER_URL?.trim() || DEFAULT_FENICS_SOLVER_URL;
-}
-
-function buildEmergencyOrganicDensityField(
-  candidate: CandidateGeometry,
+function buildTopologySolverPayload(
   requirements: StructuralBracketRequirements,
-  grid: { nx: number; ny: number; nz: number }
-): number[][][] {
-  const width = candidate.widthMm;
-  const height = candidate.heightMm;
-  const wall = candidate.wallThicknessMm;
-  const boltCount = clamp(Math.round(requirements.mounting.boltCount), 1, 12);
-  const railHeight = Math.max(wall * 2.2, height * 0.1);
-  const boltPositions = buildBoltPositions(width, height, railHeight, boltCount);
-  const loadPoints = buildLoadPoints(width, height, wall, requirements);
-  const loadCenter = averagePoints(loadPoints);
-  const boltCenter = averagePoints(boltPositions);
-  const targetSolidFraction = clamp(1 - (requirements.objectives.targetOpenAreaPercent ?? candidate.openAreaPercent ?? 58) / 100, 0.24, 0.58);
-  const loadScale = clamp(requirements.loadCase.forceN / 2500, 0.8, 1.65);
-  const pathSigma = Math.max(width, height) * 0.055 * loadScale;
-  const padSigma = Math.max(requirements.mounting.boltDiameterMm * 1.85, Math.max(width, height) * 0.045);
-  const hub: [number, number] = [
-    clamp((loadCenter[0] + boltCenter[0]) * 0.5, -width * 0.12, width * 0.12),
-    clamp(boltCenter[1] + (loadCenter[1] - boltCenter[1]) * 0.53, -height * 0.05, height * 0.22)
-  ];
-  const lowerHub: [number, number] = [boltCenter[0], boltCenter[1] + height * 0.14];
-  const raw2d: number[][] = [];
-
-  for (let x = 0; x < grid.nx; x += 1) {
-    raw2d[x] = [];
-    for (let y = 0; y < grid.ny; y += 1) {
-      const point = topologyGridToMm(x, y, grid.nx, grid.ny, width, height);
-      const loadPad = Math.max(...loadPoints.map((load) => gaussian2d(point, load, padSigma * 1.05)));
-      const boltPad = Math.max(...boltPositions.map((bolt) => gaussian2d(point, bolt, padSigma)));
-      const primaryPaths = Math.max(
-        ...boltPositions.map((bolt) => Math.max(
-          Math.exp(-(distancePointToSegment2d(point, loadCenter, bolt) ** 2) / (2 * pathSigma ** 2)),
-          Math.exp(-(distancePointToSegment2d(point, hub, bolt) ** 2) / (2 * (pathSigma * 0.82) ** 2)),
-          Math.exp(-(distancePointToSegment2d(point, loadCenter, hub) ** 2) / (2 * (pathSigma * 0.9) ** 2))
-        ))
-      );
-      const lowerBridge = Math.max(
-        ...boltPositions.map((bolt) => Math.exp(-(distancePointToSegment2d(point, lowerHub, bolt) ** 2) / (2 * (pathSigma * 0.72) ** 2)))
-      );
-      const centerVoid = Math.exp(-(distance2d(point[0], point[1], 0, (hub[1] + lowerHub[1]) * 0.5) ** 2) / (2 * (Math.min(width, height) * 0.17) ** 2));
-      raw2d[x][y] = clamp(loadPad * 0.38 + boltPad * 0.34 + primaryPaths * 0.55 + lowerBridge * 0.3 - centerVoid * 0.18, 0, 1);
-    }
-  }
-
-  const smoothed = topologySmooth2d(raw2d, 2);
-  const threshold = chooseScalarThreshold(smoothed, targetSolidFraction);
-  const density: number[][][] = [];
-
-  for (let x = 0; x < grid.nx; x += 1) {
-    density[x] = [];
-    for (let y = 0; y < grid.ny; y += 1) {
-      density[x][y] = [];
-      for (let z = 0; z < grid.nz; z += 1) {
-        const zNorm = Math.abs((z + 0.5) / Math.max(grid.nz, 1) - 0.5) * 2;
-        const shellFactor = clamp(1 - Math.max(0, zNorm - 0.72) * 1.8, 0.25, 1);
-        const value = clamp((smoothed[x][y] - threshold) * 2.4 + 0.52, 0, 1) * shellFactor;
-        density[x][y][z] = value;
-      }
-    }
-  }
-
-  return density;
-}
-
-
-function buildDensitySurfaceMesh(
-  candidate: CandidateGeometry,
-  requirements: StructuralBracketRequirements,
-  density: number[][][],
-  stats: DensityStats
-): RenderableMesh {
-  const mesh = createMeshBuilder();
-
-  const width = candidate.widthMm;
-  const height = candidate.heightMm;
-  const depth = candidate.depthMm;
-  const wall = candidate.wallThicknessMm;
-
-  const boltCount = clamp(Math.round(requirements.mounting.boltCount), 1, 12);
-  const boltDiameterMm = Math.max(requirements.mounting.boltDiameterMm, wall * 0.9);
-  const railHeight = Math.max(wall * 2.2, height * 0.1);
-  const boltPositions = buildBoltPositions(width, height, railHeight, boltCount);
-  const loadPoints = buildLoadPoints(width, height, wall, requirements);
-
-  const skeleton = extractProductionBracketSkeleton({
-    density,
-    width,
-    height,
-    depth,
-    wall,
-    boltPositions,
-    loadPoints,
-    requirements
-  });
-
-  addProductionMountingInterface(mesh, {
-    width,
-    height,
-    depth,
-    wall,
-    railHeight,
-    boltPositions,
-    boltDiameterMm,
-    requirements
-  });
-
-  addProductionLoadInterface(mesh, {
-    width,
-    height,
-    depth,
-    wall,
-    railHeight,
-    loadPoints,
-    skeleton,
-    requirements
-  });
-
-  addProductionLoadPathMembers(mesh, {
-    width,
-    height,
-    depth,
-    wall,
-    density,
-    skeleton,
-    boltPositions,
-    loadPoints,
-    requirements
-  });
-
-  addBoltHoleWallFeatures(mesh, {
-    boltPositions,
-    boltDiameterMm,
-    depth: depth * 0.9,
-    wall
-  });
-
-  candidate.derivedParameters.geometrySource = "solver-density-guided-production-bracket";
-  candidate.derivedParameters.topologyOptimizationStage = "density-guided-organic-production-surface";
-  candidate.derivedParameters.topologyPostProcessing =
-    "Solver density is converted into a manufacturable bracket surface with preserved load and bolt interfaces, open bolt holes, organic load paths, and density-guided branch placement.";
-  candidate.derivedParameters.fenicsDensityThreshold = DENSITY_THRESHOLD;
-  candidate.derivedParameters.topologyHub = `${roundTo(skeleton.loadHub[0], 0.1)},${roundTo(skeleton.loadHub[1], 0.1)}`;
-  candidate.derivedParameters.fenicsOpenAreaPercent = roundTo(stats.openAreaPercent, 0.1);
-
-  const ribCount = mesh.features.filter((feature) => feature.type === "rib").length;
-  const gussetCount = mesh.features.filter((feature) => feature.type === "gusset").length;
-  const diagonalWebCount = mesh.features.filter((feature) => feature.type === "diagonal-web").length;
-
+  candidate: CandidateGeometry
+) {
   return {
-    version: "haf-render-mesh-v1",
+    componentFamily: candidate.family,
+    componentName: requirements.componentName,
+    candidateId: candidate.id,
     units: "mm",
-    family: candidate.family,
-    vertices: mesh.vertices,
-    faces: mesh.faces,
-    features: mesh.features,
-    bounds: { widthMm: width, heightMm: height, depthMm: depth },
-    metadata: {
-      candidateId: candidate.id,
-      source: "generation-engine",
-      boltCount,
-      lighteningHoleCount: Math.max(3, Math.round(stats.openAreaPercent / 14)),
-      ribCount,
-      gussetCount,
-      diagonalWebCount,
-      skeletonized: true
-    }
-  };
-}
-type TopologyOccupancy = {
-  occupied: boolean[][][];
-  nx: number;
-  ny: number;
-  nz: number;
-};
-
-function buildManufacturableTopologyOccupancy(
-  density: number[][][],
-  args: {
-    width: number;
-    height: number;
-    depth: number;
-    wall: number;
-    boltPositions: Array<[number, number]>;
-    loadPoints: Array<[number, number]>;
-    boltDiameterMm: number;
-    requirements: StructuralBracketRequirements;
-  }
-): TopologyOccupancy {
-  const nx = density.length;
-  const ny = density[0]?.length ?? 0;
-  const nz = density[0]?.[0]?.length ?? 0;
-  const projected = projectDensityTo2d(density);
-  const smoothed = smoothScalarField2d(projected, 4);
-  const loadCenter = averagePoints(args.loadPoints);
-  const boltCenter = averagePoints(args.boltPositions);
-  const targetSolidFraction = clamp(1 - (args.requirements.objectives.targetOpenAreaPercent ?? 50) / 100, 0.22, 0.64);
-  const threshold = chooseScalarThreshold(smoothed, targetSolidFraction);
-  const loadScale = clamp(args.requirements.loadCase.forceN / 2500, 0.76, 1.75);
-  const pathSigma = Math.max(args.width, args.height) * 0.072 * loadScale;
-  const padSigma = Math.max(args.boltDiameterMm * 1.8, Math.max(args.width, args.height) * 0.045);
-  const occupied: boolean[][][] = [];
-
-  for (let x = 0; x < nx; x += 1) {
-    occupied[x] = [];
-    for (let y = 0; y < ny; y += 1) {
-      occupied[x][y] = [];
-      const point = topologyGridToMm(x, y, nx, ny, args.width, args.height);
-      const anchorBoost = Math.max(
-        ...args.boltPositions.map((bolt) => gaussian2d(point, bolt, padSigma)),
-        ...args.loadPoints.map((load) => gaussian2d(point, load, padSigma))
-      );
-      const pathBoost = Math.max(
-        ...args.boltPositions.map((bolt) => {
-          const direct = distancePointToSegment2d(point, loadCenter, bolt);
-          const bridge = distancePointToSegment2d(point, boltCenter, bolt);
-          return Math.max(
-            Math.exp(-(direct * direct) / (2 * pathSigma * pathSigma)),
-            Math.exp(-(bridge * bridge) / (2 * Math.pow(pathSigma * 0.72, 2))) * 0.55
-          );
-        })
-      );
-      const score = clamp(smoothed[x][y] * 0.72 + anchorBoost * 0.18 + pathBoost * 0.22, 0, 1.28);
-      const solidColumn = score >= threshold;
-      const centerBias = clamp(score, 0.28, 1);
-
-      for (let z = 0; z < nz; z += 1) {
-        const zNorm = Math.abs((z + 0.5) / Math.max(nz, 1) - 0.5) * 2;
-        const shellKeep = zNorm < clamp(0.72 + centerBias * 0.18, 0.68, 0.92);
-        occupied[x][y][z] = solidColumn && shellKeep;
-      }
-    }
-  }
-
-  let result: TopologyOccupancy = { occupied, nx, ny, nz };
-  result.occupied = smoothBooleanOccupancy(result.occupied, 2, 12);
-  result.occupied = ensureMinimumTopologyThickness(result.occupied, Math.max(1, Math.round(args.wall / Math.max(args.width / Math.max(nx, 1), 1))));
-  return result;
-}
-
-function projectDensityTo2d(density: number[][][]): number[][] {
-  const nx = density.length;
-  const ny = density[0]?.length ?? 0;
-  const nz = density[0]?.[0]?.length ?? 1;
-  const projected: number[][] = [];
-
-  for (let x = 0; x < nx; x += 1) {
-    projected[x] = [];
-    for (let y = 0; y < ny; y += 1) {
-      let maxValue = 0;
-      let sum = 0;
-      for (let z = 0; z < nz; z += 1) {
-        const value = Number.isFinite(density[x]?.[y]?.[z]) ? clamp(density[x][y][z], 0, 1) : 0;
-        maxValue = Math.max(maxValue, value);
-        sum += value;
-      }
-      projected[x][y] = clamp(maxValue * 0.64 + (sum / Math.max(nz, 1)) * 0.36, 0, 1);
-    }
-  }
-
-  return projected;
-}
-
-function smoothScalarField2d(values: number[][], passes: number): number[][] {
-  let current = values.map((row) => [...row]);
-  const nx = current.length;
-  const ny = current[0]?.length ?? 0;
-
-  for (let pass = 0; pass < passes; pass += 1) {
-    const next = current.map((row) => [...row]);
-    for (let x = 0; x < nx; x += 1) {
-      for (let y = 0; y < ny; y += 1) {
-        let sum = 0;
-        let weight = 0;
-        for (let dx = -2; dx <= 2; dx += 1) {
-          for (let dy = -2; dy <= 2; dy += 1) {
-            const xx = x + dx;
-            const yy = y + dy;
-            if (xx < 0 || xx >= nx || yy < 0 || yy >= ny) continue;
-            const distance = Math.hypot(dx, dy);
-            const localWeight = Math.exp(-(distance * distance) / 3.2);
-            sum += current[xx][yy] * localWeight;
-            weight += localWeight;
-          }
-        }
-        next[x][y] = sum / Math.max(weight, 1);
-      }
-    }
-    current = next;
-  }
-
-  return current;
-}
-
-function chooseScalarThreshold(values: number[][], targetSolidFraction: number): number {
-  const flat = values.flat().filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
-  if (!flat.length) return DENSITY_THRESHOLD;
-  const index = clamp(Math.floor((1 - targetSolidFraction) * (flat.length - 1)), 0, flat.length - 1);
-  return clamp(flat[index], 0.28, 0.72);
-}
-
-function smoothBooleanOccupancy(occupied: boolean[][][], passes: number, keepThreshold: number): boolean[][][] {
-  let current = cloneOccupancy(occupied);
-  const nx = current.length;
-  const ny = current[0]?.length ?? 0;
-  const nz = current[0]?.[0]?.length ?? 0;
-
-  for (let pass = 0; pass < passes; pass += 1) {
-    const next = cloneOccupancy(current);
-    for (let x = 0; x < nx; x += 1) {
-      for (let y = 0; y < ny; y += 1) {
-        for (let z = 0; z < nz; z += 1) {
-          let neighbors = 0;
-          for (let dx = -1; dx <= 1; dx += 1) {
-            for (let dy = -1; dy <= 1; dy += 1) {
-              for (let dz = -1; dz <= 1; dz += 1) {
-                const xx = x + dx;
-                const yy = y + dy;
-                const zz = z + dz;
-                if (xx < 0 || xx >= nx || yy < 0 || yy >= ny || zz < 0 || zz >= nz) continue;
-                if (current[xx][yy][zz]) neighbors += 1;
-              }
-            }
-          }
-          next[x][y][z] = neighbors >= keepThreshold;
-        }
-      }
-    }
-    current = next;
-  }
-
-  return current;
-}
-
-function ensureMinimumTopologyThickness(occupied: boolean[][][], radiusCells: number): boolean[][][] {
-  if (radiusCells <= 0) return occupied;
-  const nx = occupied.length;
-  const ny = occupied[0]?.length ?? 0;
-  const nz = occupied[0]?.[0]?.length ?? 0;
-  const result = cloneOccupancy(occupied);
-
-  for (let x = 0; x < nx; x += 1) {
-    for (let y = 0; y < ny; y += 1) {
-      for (let z = 0; z < nz; z += 1) {
-        if (!occupied[x][y][z]) continue;
-        for (let dx = -radiusCells; dx <= radiusCells; dx += 1) {
-          for (let dy = -radiusCells; dy <= radiusCells; dy += 1) {
-            for (let dz = -1; dz <= 1; dz += 1) {
-              if (Math.hypot(dx, dy, dz) > radiusCells + 0.75) continue;
-              const xx = x + dx;
-              const yy = y + dy;
-              const zz = z + dz;
-              if (xx < 0 || xx >= nx || yy < 0 || yy >= ny || zz < 0 || zz >= nz) continue;
-              result[xx][yy][zz] = true;
-            }
-          }
-        }
-      }
-    }
-  }
-
-  return result;
-}
-
-function removeIsolatedTopologyVoxels(occupied: boolean[][][], minimumNeighbors: number) {
-  const nx = occupied.length;
-  const ny = occupied[0]?.length ?? 0;
-  const nz = occupied[0]?.[0]?.length ?? 0;
-  const removals: Array<[number, number, number]> = [];
-
-  for (let x = 0; x < nx; x += 1) {
-    for (let y = 0; y < ny; y += 1) {
-      for (let z = 0; z < nz; z += 1) {
-        if (!occupied[x][y][z]) continue;
-        let neighbors = 0;
-        for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
-          const xx = x + dx;
-          const yy = y + dy;
-          const zz = z + dz;
-          if (xx >= 0 && xx < nx && yy >= 0 && yy < ny && zz >= 0 && zz < nz && occupied[xx][yy][zz]) neighbors += 1;
-        }
-        if (neighbors < minimumNeighbors) removals.push([x, y, z]);
-      }
-    }
-  }
-
-  for (const [x, y, z] of removals) occupied[x][y][z] = false;
-}
-
-function closeSmallTopologyVoids(occupied: boolean[][][], minimumSolidNeighbors: number) {
-  const nx = occupied.length;
-  const ny = occupied[0]?.length ?? 0;
-  const nz = occupied[0]?.[0]?.length ?? 0;
-  const additions: Array<[number, number, number]> = [];
-
-  for (let x = 1; x < nx - 1; x += 1) {
-    for (let y = 1; y < ny - 1; y += 1) {
-      for (let z = 1; z < nz - 1; z += 1) {
-        if (occupied[x][y][z]) continue;
-        let neighbors = 0;
-        for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
-          if (occupied[x + dx][y + dy][z + dz]) neighbors += 1;
-        }
-        if (neighbors >= 6 - minimumSolidNeighbors) additions.push([x, y, z]);
-      }
-    }
-  }
-
-  for (const [x, y, z] of additions) occupied[x][y][z] = true;
-}
-
-function enforceSolidBox(
-  topology: TopologyOccupancy,
-  args: { width: number; height: number; depth: number; min: Vec3; max: Vec3 }
-) {
-  forEachTopologyCell(topology, args.width, args.height, args.depth, (x, y, z, point) => {
-    if (
-      point[0] >= args.min[0] &&
-      point[0] <= args.max[0] &&
-      point[1] >= args.min[1] &&
-      point[1] <= args.max[1] &&
-      point[2] >= args.min[2] &&
-      point[2] <= args.max[2]
-    ) {
-      topology.occupied[x][y][z] = true;
-    }
-  });
-}
-
-function enforceSolidEllipticalPad(
-  topology: TopologyOccupancy,
-  args: { width: number; height: number; depth: number; center: [number, number]; radiusX: number; radiusY: number; zHalfDepth: number }
-) {
-  forEachTopologyCell(topology, args.width, args.height, args.depth, (x, y, z, point) => {
-    const value = ((point[0] - args.center[0]) / Math.max(args.radiusX, 0.001)) ** 2 + ((point[1] - args.center[1]) / Math.max(args.radiusY, 0.001)) ** 2;
-    if (value <= 1 && Math.abs(point[2]) <= args.zHalfDepth) {
-      topology.occupied[x][y][z] = true;
-    }
-  });
-}
-
-function forEachTopologyCell(
-  topology: TopologyOccupancy,
-  width: number,
-  height: number,
-  depth: number,
-  visitor: (x: number, y: number, z: number, point: Vec3) => void
-) {
-  for (let x = 0; x < topology.nx; x += 1) {
-    for (let y = 0; y < topology.ny; y += 1) {
-      for (let z = 0; z < topology.nz; z += 1) {
-        visitor(x, y, z, [
-          -width / 2 + ((x + 0.5) / Math.max(topology.nx, 1)) * width,
-          -height / 2 + ((y + 0.5) / Math.max(topology.ny, 1)) * height,
-          -depth / 2 + ((z + 0.5) / Math.max(topology.nz, 1)) * depth
-        ]);
-      }
-    }
-  }
-}
-
-function cloneOccupancy(occupied: boolean[][][]) {
-  return occupied.map((plane) => plane.map((row) => [...row]));
-}
-
-function countOccupied(occupied: boolean[][][]) {
-  let solid = 0;
-  let total = 0;
-  for (const plane of occupied) {
-    for (const row of plane) {
-      for (const value of row) {
-        total += 1;
-        if (value) solid += 1;
-      }
-    }
-  }
-  return { solid, total };
-}
-
-function addTopologyInterfaceFace(
-  mesh: MeshBuilder,
-  options: { id: string; group: string; min: Vec3; max: Vec3; shade: number }
-) {
-  addBoxFeature(mesh, options);
-}
-
-
-type TopologyField = {
-  values: number[][];
-  nx: number;
-  ny: number;
-};
-
-function topologyOptimizeDensityField(
-  density: number[][][],
-  args: {
-    width: number;
-    height: number;
-    boltPositions: Array<[number, number]>;
-    loadPoints: Array<[number, number]>;
-    boltDiameterMm: number;
-    requirements: StructuralBracketRequirements;
-  }
-): TopologyField {
-  const nx = density.length;
-  const ny = density[0]?.length ?? 0;
-  const nz = density[0]?.[0]?.length ?? 1;
-  const projected: number[][] = [];
-
-  for (let x = 0; x < nx; x += 1) {
-    projected[x] = [];
-    for (let y = 0; y < ny; y += 1) {
-      let maxValue = 0;
-      let sum = 0;
-      for (let z = 0; z < nz; z += 1) {
-        const value = Number.isFinite(density[x]?.[y]?.[z]) ? clamp(density[x][y][z], 0, 1) : 0;
-        maxValue = Math.max(maxValue, value);
-        sum += value;
-      }
-      projected[x][y] = clamp(maxValue * 0.72 + (sum / Math.max(nz, 1)) * 0.28, 0, 1);
-    }
-  }
-
-  const smoothed = topologySmooth2d(projected, 3);
-  const loadCenter = averagePoints(args.loadPoints);
-  const boltCenter = averagePoints(args.boltPositions);
-  const requiredLoadBias = clamp(args.requirements.loadCase.forceN / 2500, 0.7, 1.7);
-
-  for (let x = 0; x < nx; x += 1) {
-    for (let y = 0; y < ny; y += 1) {
-      const point = topologyGridToMm(x, y, nx, ny, args.width, args.height);
-      const anchorBoost = Math.max(
-        ...args.boltPositions.map((bolt) => gaussian2d(point, bolt, Math.max(args.boltDiameterMm * 2.4, args.width * 0.05))),
-        ...args.loadPoints.map((load) => gaussian2d(point, load, Math.max(args.boltDiameterMm * 2.1, args.width * 0.05)))
-      );
-      const centerlineDistance = distancePointToSegment2d(point, loadCenter, boltCenter);
-      const compressionBias = Math.exp(-(centerlineDistance * centerlineDistance) / (2 * Math.pow(args.width * 0.18, 2)));
-      smoothed[x][y] = clamp(smoothed[x][y] * 0.72 + anchorBoost * 0.2 + compressionBias * 0.08 * requiredLoadBias, 0, 1);
-    }
-  }
-
-  return { values: topologySmooth2d(smoothed, 2), nx, ny };
-}
-
-function topologySmooth2d(values: number[][], passes: number): number[][] {
-  let current = values.map((row) => [...row]);
-  const nx = current.length;
-  const ny = current[0]?.length ?? 0;
-
-  for (let pass = 0; pass < passes; pass += 1) {
-    const next = current.map((row) => [...row]);
-    for (let x = 0; x < nx; x += 1) {
-      for (let y = 0; y < ny; y += 1) {
-        let sum = 0;
-        let weight = 0;
-        for (let dx = -1; dx <= 1; dx += 1) {
-          for (let dy = -1; dy <= 1; dy += 1) {
-            const xx = x + dx;
-            const yy = y + dy;
-            if (xx < 0 || xx >= nx || yy < 0 || yy >= ny) continue;
-            const localWeight = dx === 0 && dy === 0 ? 4 : dx === 0 || dy === 0 ? 2 : 1;
-            sum += current[xx][yy] * localWeight;
-            weight += localWeight;
-          }
-        }
-        next[x][y] = sum / Math.max(weight, 1);
-      }
-    }
-    current = next;
-  }
-
-  return current;
-}
-
-function topologyFindLoadHub(
-  field: TopologyField,
-  width: number,
-  height: number,
-  boltPositions: Array<[number, number]>,
-  loadPoint: [number, number]
-): [number, number] {
-  const boltCenter = averagePoints(boltPositions);
-  const ideal: [number, number] = [
-    clamp((loadPoint[0] + boltCenter[0]) / 2, -width * 0.18, width * 0.18),
-    clamp(boltCenter[1] + (loadPoint[1] - boltCenter[1]) * 0.56, -height * 0.08, height * 0.22)
-  ];
-  let best = ideal;
-  let bestScore = -Infinity;
-
-  for (let x = Math.floor(field.nx * 0.34); x <= Math.ceil(field.nx * 0.66); x += 1) {
-    for (let y = Math.floor(field.ny * 0.32); y <= Math.ceil(field.ny * 0.72); y += 1) {
-      const point = topologyGridToMm(x, y, field.nx, field.ny, width, height);
-      const densityScore = field.values[x]?.[y] ?? 0;
-      const idealPenalty = distance2d(point[0], point[1], ideal[0], ideal[1]) / Math.max(width, height);
-      const balancePenalty = Math.abs(distance2d(point[0], point[1], loadPoint[0], loadPoint[1]) - averageDistanceToPoints(point, boltPositions)) / Math.max(width, 1);
-      const score = densityScore * 1.8 - idealPenalty * 0.7 - balancePenalty * 0.28;
-      if (score > bestScore) {
-        bestScore = score;
-        best = point;
-      }
-    }
-  }
-
-  return best;
-}
-
-function topologyTraceOptimalPath(
-  field: TopologyField,
-  args: {
-    from: [number, number];
-    to: [number, number];
-    width: number;
-    height: number;
-    preferCompressionArch: boolean;
-    sideBias: number;
-  }
-): Array<[number, number]> {
-  const start = topologyMmToGrid(args.from, field.nx, field.ny, args.width, args.height);
-  const goal = topologyMmToGrid(args.to, field.nx, field.ny, args.width, args.height);
-  const nodeCount = field.nx * field.ny;
-  const dist = new Array<number>(nodeCount).fill(Infinity);
-  const prev = new Array<number>(nodeCount).fill(-1);
-  const visited = new Array<boolean>(nodeCount).fill(false);
-  const indexOf = (x: number, y: number) => y * field.nx + x;
-  const heuristicGoal = topologyGridToMm(goal[0], goal[1], field.nx, field.ny, args.width, args.height);
-  const neighbors = [
-    [1, 0],
-    [-1, 0],
-    [0, 1],
-    [0, -1],
-    [1, 1],
-    [-1, 1],
-    [1, -1],
-    [-1, -1]
-  ];
-
-  dist[indexOf(start[0], start[1])] = 0;
-
-  for (let iteration = 0; iteration < nodeCount; iteration += 1) {
-    let current = -1;
-    let currentScore = Infinity;
-    for (let index = 0; index < nodeCount; index += 1) {
-      if (!visited[index] && dist[index] < currentScore) {
-        currentScore = dist[index];
-        current = index;
-      }
-    }
-    if (current < 0) break;
-    if (current === indexOf(goal[0], goal[1])) break;
-    visited[current] = true;
-    const x = current % field.nx;
-    const y = Math.floor(current / field.nx);
-    const currentPoint = topologyGridToMm(x, y, field.nx, field.ny, args.width, args.height);
-
-    for (const [dx, dy] of neighbors) {
-      const xx = x + dx;
-      const yy = y + dy;
-      if (xx < 0 || xx >= field.nx || yy < 0 || yy >= field.ny) continue;
-      const nextIndex = indexOf(xx, yy);
-      if (visited[nextIndex]) continue;
-      const nextPoint = topologyGridToMm(xx, yy, field.nx, field.ny, args.width, args.height);
-      const density = field.values[xx]?.[yy] ?? 0;
-      const densityCost = 1.22 - density;
-      const stepCost = Math.hypot(dx, dy);
-      const straightnessPenalty = distancePointToSegment2d(nextPoint, args.from, args.to) / Math.max(args.width, 1);
-      const archPenalty = args.preferCompressionArch
-        ? Math.max(0, (args.from[1] + args.to[1]) / 2 - nextPoint[1]) / Math.max(args.height, 1)
-        : 0;
-      const sidePenalty = Math.max(0, -args.sideBias * (nextPoint[0] - currentPoint[0])) / Math.max(args.width, 1);
-      const heuristic = distance2d(nextPoint[0], nextPoint[1], heuristicGoal[0], heuristicGoal[1]) / Math.max(args.width, args.height);
-      const nextDistance =
-        dist[current] +
-        stepCost * densityCost +
-        straightnessPenalty * 0.34 +
-        archPenalty * 0.22 +
-        sidePenalty * 0.08 +
-        heuristic * 0.05;
-
-      if (nextDistance < dist[nextIndex]) {
-        dist[nextIndex] = nextDistance;
-        prev[nextIndex] = current;
-      }
-    }
-  }
-
-  const path: Array<[number, number]> = [];
-  let cursor = indexOf(goal[0], goal[1]);
-  let guard = 0;
-
-  while (cursor >= 0 && guard < nodeCount) {
-    const x = cursor % field.nx;
-    const y = Math.floor(cursor / field.nx);
-    path.push(topologyGridToMm(x, y, field.nx, field.ny, args.width, args.height));
-    if (cursor === indexOf(start[0], start[1])) break;
-    cursor = prev[cursor];
-    guard += 1;
-  }
-
-  if (path.length < 2) return [args.from, args.to];
-  return path.reverse();
-}
-
-function topologySmoothPath(points: Array<[number, number]>, width: number, height: number): Array<[number, number]> {
-  if (points.length <= 2) return points;
-  const simplified = topologySimplifyPath(points, Math.max(width, height) * 0.025);
-  let current = simplified.map((point) => [...point] as [number, number]);
-
-  for (let pass = 0; pass < 2; pass += 1) {
-    const next: Array<[number, number]> = [current[0]];
-    for (let index = 0; index < current.length - 1; index += 1) {
-      const a = current[index];
-      const b = current[index + 1];
-      next.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25]);
-      next.push([a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]);
-    }
-    next.push(current[current.length - 1]);
-    current = next.map(([x, y]) => [clamp(x, -width / 2, width / 2), clamp(y, -height / 2, height / 2)]);
-  }
-
-  return current;
-}
-
-function topologySimplifyPath(points: Array<[number, number]>, tolerance: number): Array<[number, number]> {
-  if (points.length <= 2) return points;
-  const result: Array<[number, number]> = [points[0]];
-  let anchor = points[0];
-
-  for (let index = 1; index < points.length - 1; index += 1) {
-    const point = points[index];
-    const next = points[index + 1];
-    if (distancePointToSegment2d(point, anchor, next) > tolerance) {
-      result.push(point);
-      anchor = point;
-    }
-  }
-
-  result.push(points[points.length - 1]);
-  return result;
-}
-
-function addTopologyOptimizedMember(
-  mesh: MeshBuilder,
-  options: {
-    id: string;
-    group: string;
-    points: Vec3[];
-    baseRadius: number;
-    minRadius: number;
-    depth: number;
-    width: number;
-    height: number;
-    field: TopologyField;
-    shade: number;
-  }
-) {
-  if (options.points.length < 2) return;
-  const sweptPoints = options.points.map((point, index) => {
-    const density = topologySampleField(options.field, point[0], point[1], options.width, options.height);
-    const t = index / Math.max(options.points.length - 1, 1);
-    const endBlend = 0.8 + Math.sin(Math.PI * t) * 0.28;
-    const radius = Math.max(options.minRadius, options.baseRadius * clamp(0.74 + density * 0.5, 0.72, 1.32) * endBlend);
-    return {
-      point,
-      radiusXy: radius,
-      radiusZ: Math.max(options.depth * 0.18, radius * 1.12),
-      shade: options.shade + density * 0.12
-    };
-  });
-
-  addSweptOrganicTube(mesh, {
-    id: options.id,
-    group: options.group,
-    points: sweptPoints,
-    ringSegments: 18
-  });
-}
-
-function addTopologyShearWeb(
-  mesh: MeshBuilder,
-  options: {
-    id: string;
-    from: [number, number];
-    apex: [number, number];
-    bridge: [number, number];
-    depth: number;
-    shade: number;
-  }
-) {
-  addExtrudedPolygon(mesh, {
-    id: options.id,
-    group: "gusset",
-    points: [options.from, options.apex, options.bridge],
-    z0: -options.depth / 2,
-    z1: options.depth / 2,
-    shade: options.shade
-  });
-}
-
-function polylineLength(points: Vec3[]): number {
-  let length = 0;
-  for (let index = 1; index < points.length; index += 1) {
-    const previous = points[index - 1];
-    const current = points[index];
-    length += Math.hypot(current[0] - previous[0], current[1] - previous[1], current[2] - previous[2]);
-  }
-  return length;
-}
-
-
-function topologySampleField(field: TopologyField, xMm: number, yMm: number, widthMm: number, heightMm: number) {
-  const [x, y] = topologyMmToGrid([xMm, yMm], field.nx, field.ny, widthMm, heightMm);
-  return field.values[x]?.[y] ?? 0;
-}
-
-function topologyMmToGrid(point: [number, number], nx: number, ny: number, width: number, height: number): [number, number] {
-  return [
-    clamp(Math.round(((point[0] + width / 2) / Math.max(width, 1)) * (nx - 1)), 0, nx - 1),
-    clamp(Math.round(((point[1] + height / 2) / Math.max(height, 1)) * (ny - 1)), 0, ny - 1)
-  ];
-}
-
-function topologyGridToMm(x: number, y: number, nx: number, ny: number, width: number, height: number): [number, number] {
-  return [-width / 2 + ((x + 0.5) / Math.max(nx, 1)) * width, -height / 2 + ((y + 0.5) / Math.max(ny, 1)) * height];
-}
-
-function gaussian2d(point: [number, number], center: [number, number], sigma: number) {
-  const distance = distance2d(point[0], point[1], center[0], center[1]);
-  return Math.exp(-(distance * distance) / (2 * Math.max(sigma * sigma, 0.0001)));
-}
-
-function distancePointToSegment2d(point: [number, number], start: [number, number], end: [number, number]) {
-  const abx = end[0] - start[0];
-  const aby = end[1] - start[1];
-  const apx = point[0] - start[0];
-  const apy = point[1] - start[1];
-  const lengthSquared = abx * abx + aby * aby;
-  if (lengthSquared <= 0.000001) return distance2d(point[0], point[1], start[0], start[1]);
-  const t = clamp((apx * abx + apy * aby) / lengthSquared, 0, 1);
-  const closest: [number, number] = [start[0] + abx * t, start[1] + aby * t];
-  return distance2d(point[0], point[1], closest[0], closest[1]);
-}
-
-function averageDistanceToPoints(point: [number, number], points: Array<[number, number]>) {
-  if (!points.length) return 0;
-  return points.reduce((sum, current) => sum + distance2d(point[0], point[1], current[0], current[1]), 0) / points.length;
-}
-
-
-type ProductionBracketSkeleton = {
-  nodes: DensitySkeletonNode[];
-  paths: DensitySkeletonPath[];
-  loadHub: [number, number];
-  lowerBridge: [number, number];
-  loadLandCenter: [number, number];
-};
-
-function extractProductionBracketSkeleton(args: {
-  density: number[][][];
-  width: number;
-  height: number;
-  depth: number;
-  wall: number;
-  boltPositions: Array<[number, number]>;
-  loadPoints: Array<[number, number]>;
-  requirements: StructuralBracketRequirements;
-}): ProductionBracketSkeleton {
-  const { density, width, height, wall, boltPositions, loadPoints, requirements } = args;
-  const boltCenter = averagePoints(boltPositions);
-  const loadCenter = averagePoints(loadPoints);
-  const densityCentroid = weightedDensityCentroid(density, width, height);
-  const loadScale = clamp(requirements.loadCase.forceN / 2500, 0.78, 1.68);
-  const vibrationScale = clamp((requirements.loadCase.vibrationHz ?? 0) / 160, 0, 1.25);
-  const baseThickness = Math.max(wall * 1.35, Math.min(width, height) * 0.05) * loadScale;
-
-  const loadLandCenter: [number, number] = [
-    clamp(loadCenter[0], -width * 0.16, width * 0.16),
-    clamp(loadCenter[1], height * 0.29, height * 0.43)
-  ];
-
-  const loadHub: [number, number] = [
-    clamp(densityCentroid[0] * 0.28 + loadLandCenter[0] * 0.52 + boltCenter[0] * 0.2, -width * 0.15, width * 0.15),
-    clamp(densityCentroid[1] * 0.25 + height * 0.08 + loadLandCenter[1] * 0.22, -height * 0.03, height * 0.21)
-  ];
-
-  const lowerBridge: [number, number] = [
-    clamp(boltCenter[0], -width * 0.08, width * 0.08),
-    clamp(boltCenter[1] + height * 0.095, -height * 0.31, -height * 0.08)
-  ];
-
-  const nodes: DensitySkeletonNode[] = [
-    {
-      id: "production-primary-load-hub",
-      point: loadHub,
-      radius: baseThickness * 1.1,
-      group: "diagonal-web"
+    objective: "minimum-compliance-topology-optimization",
+    requireMesh: true,
+    disableFallbackGeometry: true,
+    solverPipeline: {
+      fenics: true,
+      gmsh: true,
+      calculix: true
     },
-    {
-      id: "production-load-land-transition-node",
-      point: [loadLandCenter[0], loadLandCenter[1] - height * 0.075],
-      radius: baseThickness * 0.84,
-      group: "load-plate"
+    loadCase: {
+      forceN: requirements.loadCase.forceN,
+      direction: requirements.loadCase.direction,
+      vibrationHz: requirements.loadCase.vibrationHz ?? 0,
+      safetyFactor: requirements.safetyFactor
     },
-    {
-      id: "production-lower-bolt-bridge-node",
-      point: lowerBridge,
-      radius: baseThickness * 0.72,
-      group: "rib"
-    }
-  ];
-
-  const paths: DensitySkeletonPath[] = [];
-
-  boltPositions.forEach((bolt, index) => {
-    const start = offsetPointAlongSegment(bolt, loadHub, Math.max(wall * 2.3, baseThickness * 1.25));
-    const side = bolt[0] < loadHub[0] ? -1 : 1;
-    const control = densityGuidedControlPoint({
-      density,
-      width,
-      height,
-      from: start,
-      to: loadHub,
-      preferredOffset: [side * width * 0.045, height * 0.065]
-    });
-    const localDensity = sampleDensityAtPoint(density, (start[0] + loadHub[0]) / 2, (start[1] + loadHub[1]) / 2, width, height);
-
-    paths.push({
-      id: `production-primary-load-arm-${index + 1}`,
-      from: start,
-      control,
-      to: loadHub,
-      thickness: baseThickness * clamp(1.04 + localDensity * 0.28, 0.94, 1.34),
-      group: "diagonal-web",
-      shade: 0.66
-    });
-
-    const lowerStart = offsetPointAlongSegment(bolt, lowerBridge, Math.max(wall * 2.0, baseThickness * 1.05));
-    paths.push({
-      id: `production-lower-shear-tie-${index + 1}`,
-      from: lowerStart,
-      control: [(lowerStart[0] + lowerBridge[0]) / 2, lowerBridge[1] - height * 0.025],
-      to: lowerBridge,
-      thickness: baseThickness * 0.46,
-      group: "rib",
-      shade: 0.5
-    });
-  });
-
-  paths.push({
-    id: "production-load-hub-to-load-land",
-    from: loadHub,
-    control: densityGuidedControlPoint({
-      density,
-      width,
-      height,
-      from: loadHub,
-      to: loadLandCenter,
-      preferredOffset: [0, height * 0.035]
-    }),
-    to: [loadLandCenter[0], loadLandCenter[1] - height * 0.055],
-    thickness: baseThickness * 0.88,
-    group: "diagonal-web",
-    shade: 0.7
-  });
-
-  if (boltPositions.length >= 2) {
-    const sortedBolts = [...boltPositions].sort((a, b) => a[0] - b[0]);
-    const left = sortedBolts[0];
-    const right = sortedBolts[sortedBolts.length - 1];
-    paths.push({
-      id: "production-bolt-to-bolt-mounting-tie",
-      from: offsetPointAlongSegment(left, right, Math.max(wall * 2.1, baseThickness * 1.16)),
-      control: [0, Math.min(left[1], right[1]) - height * 0.018],
-      to: offsetPointAlongSegment(right, left, Math.max(wall * 2.1, baseThickness * 1.16)),
-      thickness: baseThickness * 0.44,
-      group: "rib",
-      shade: 0.48
-    });
-  }
-
-  if (vibrationScale > 0.18) {
-    paths.push({
-      id: "production-vibration-lateral-stabilizer",
-      from: [-width * 0.31, lowerBridge[1] + height * 0.14],
-      control: [0, loadHub[1] - height * 0.035],
-      to: [width * 0.31, lowerBridge[1] + height * 0.17],
-      thickness: baseThickness * (0.26 + vibrationScale * 0.12),
-      group: "gusset",
-      shade: 0.46
-    });
-  }
-
-  return {
-    nodes,
-    paths,
-    loadHub,
-    lowerBridge,
-    loadLandCenter
+    mounting: {
+      boltCount: requirements.mounting.boltCount,
+      boltDiameterMm: requirements.mounting.boltDiameterMm,
+      spacingMm: requirements.mounting.spacingMm
+    },
+    envelope: {
+      widthMm: candidate.widthMm,
+      heightMm: candidate.heightMm,
+      depthMm: candidate.depthMm,
+      maxWidthMm: requirements.envelope.maxWidthMm,
+      maxHeightMm: requirements.envelope.maxHeightMm,
+      maxDepthMm: requirements.envelope.maxDepthMm
+    },
+    manufacturing: {
+      process: requirements.manufacturing.process,
+      minWallThicknessMm: requirements.manufacturing.minWallThicknessMm,
+      maxOverhangDeg: requirements.manufacturing.maxOverhangDeg,
+      supportAllowed: requirements.manufacturing.supportAllowed
+    },
+    objectives: {
+      priority: requirements.objectives.priority,
+      targetMassKg: requirements.objectives.targetMassKg,
+      targetOpenAreaPercent:
+        requirements.objectives.targetOpenAreaPercent ?? candidate.openAreaPercent ?? 55
+    },
+    material: candidate.material
   };
 }
 
-function addProductionMountingInterface(
-  mesh: MeshBuilder,
-  args: {
-    width: number;
-    height: number;
-    depth: number;
-    wall: number;
-    railHeight: number;
-    boltPositions: Array<[number, number]>;
-    boltDiameterMm: number;
-    requirements: StructuralBracketRequirements;
-  }
-) {
-  const { width, height, depth, wall, railHeight, boltPositions, boltDiameterMm } = args;
-  const landDepth = depth * 0.86;
-  const baseLandWidth = clamp(
-    args.requirements.mounting.spacingMm + boltDiameterMm * 4.3,
-    width * 0.64,
-    width * 0.92
-  );
-  const baseLandHeight = Math.max(wall * 2.4, railHeight * 0.58);
-  const baseY0 = -height / 2 + railHeight * 0.18;
-  const baseY1 = baseY0 + baseLandHeight;
-
-  addBoxFeature(mesh, {
-    id: "production-flat-mounting-land",
-    group: "mounting-plate",
-    min: [-baseLandWidth / 2, baseY0, -landDepth / 2],
-    max: [baseLandWidth / 2, baseY1, landDepth / 2],
-    shade: 0.56
-  });
-
-  for (let index = 0; index < boltPositions.length; index += 1) {
-    const [x, y] = boltPositions[index];
-    const padRadius = Math.max(boltDiameterMm * 1.42, wall * 2.05);
-    addFlatBossPad(mesh, {
-      id: `production-flat-bolt-seat-${index + 1}`,
-      group: "mounting-plate",
-      center: [x, y, 0],
-      radiusX: padRadius * 1.22,
-      radiusY: padRadius,
-      depth: landDepth * 1.05,
-      segments: 32,
-      shade: 0.62
-    });
-  }
-}
-
-function addProductionLoadInterface(
-  mesh: MeshBuilder,
-  args: {
-    width: number;
-    height: number;
-    depth: number;
-    wall: number;
-    railHeight: number;
-    loadPoints: Array<[number, number]>;
-    skeleton: ProductionBracketSkeleton;
-    requirements: StructuralBracketRequirements;
-  }
-) {
-  const { width, height, depth, wall, railHeight, skeleton, requirements } = args;
-  const landDepth = depth * 0.82;
-  const loadWidth = requirements.loadCase.direction === "lateral" ? width * 0.34 : width * 0.48;
-  const loadHeight = Math.max(wall * 2.35, railHeight * 0.48);
-  const center = skeleton.loadLandCenter;
-
-  addBoxFeature(mesh, {
-    id: "production-flat-load-interface-land",
-    group: "load-plate",
-    min: [center[0] - loadWidth / 2, center[1] - loadHeight / 2, -landDepth / 2],
-    max: [center[0] + loadWidth / 2, center[1] + loadHeight / 2, landDepth / 2],
-    shade: 0.64
-  });
-
-  addFlatBossPad(mesh, {
-    id: "production-load-spreader-boss",
-    group: "load-plate",
-    center: [center[0], center[1] - loadHeight * 0.62, 0],
-    radiusX: Math.max(loadWidth * 0.22, wall * 2.1),
-    radiusY: Math.max(loadHeight * 0.82, wall * 2.0),
-    depth: landDepth * 0.9,
-    segments: 32,
-    shade: 0.68
-  });
-}
-
-function addProductionLoadPathMembers(
-  mesh: MeshBuilder,
-  args: {
-    width: number;
-    height: number;
-    depth: number;
-    wall: number;
-    density: number[][][];
-    skeleton: ProductionBracketSkeleton;
-    boltPositions: Array<[number, number]>;
-    loadPoints: Array<[number, number]>;
-    requirements: StructuralBracketRequirements;
-  }
-) {
-  const { width, height, depth, wall, density, skeleton } = args;
-  const memberDepth = depth * 0.72;
-
-  for (const node of skeleton.nodes) {
-    const densityAtNode = sampleDensityAtPoint(density, node.point[0], node.point[1], width, height);
-    addOrganicNodePad(mesh, {
-      id: node.id,
-      group: node.group,
-      center: [node.point[0], node.point[1], 0],
-      radius: node.radius * clamp(0.82 + densityAtNode * 0.28, 0.78, 1.18),
-      depth: memberDepth * (node.group === "load-plate" ? 0.88 : 1),
-      segments: 30,
-      shade: node.group === "load-plate" ? 0.7 : 0.64
-    });
-  }
-
-  for (const path of skeleton.paths) {
-    addProductionPathMember(mesh, { ...path, density, width, height, depth: memberDepth });
-  }
-
-  addProductionTriangularShearWebs(mesh, {
-    width,
-    height,
-    depth,
-    wall,
-    skeleton,
-    boltPositions: args.boltPositions
-  });
-}
-
-function addProductionPathMember(
-  mesh: MeshBuilder,
-  options: DensitySkeletonPath & { density: number[][][]; width: number; height: number; depth: number }
-) {
-  const curveSegments = 16;
-  const ringSegments = 16;
-  const points: Array<{ point: Vec3; radiusXy: number; radiusZ: number; shade: number }> = [];
-
-  for (let index = 0; index <= curveSegments; index += 1) {
-    const t = index / curveSegments;
-    const [x, y] = quadraticPoint(options.from, options.control, options.to, t);
-    const densityValue = sampleDensityAtPoint(options.density, x, y, options.width, options.height);
-    const taper = 0.76 + Math.sin(Math.PI * t) * 0.3;
-    const localRadius = (options.thickness / 2) * clamp(0.84 + densityValue * 0.42, 0.78, 1.34) * taper;
-
-    points.push({
-      point: [x, y, 0],
-      radiusXy: localRadius,
-      radiusZ: Math.max(options.depth * 0.18, localRadius * 1.18),
-      shade: options.shade + densityValue * 0.1
-    });
-  }
-
-  addSweptOrganicTube(mesh, {
-    id: options.id,
-    group: options.group,
-    points,
-    ringSegments
-  });
-}
-
-function addProductionTriangularShearWebs(
-  mesh: MeshBuilder,
-  args: {
-    width: number;
-    height: number;
-    depth: number;
-    wall: number;
-    skeleton: ProductionBracketSkeleton;
-    boltPositions: Array<[number, number]>;
-  }
-) {
-  const { depth, wall, skeleton, boltPositions } = args;
-  if (boltPositions.length < 2) return;
-
-  const sorted = [...boltPositions].sort((a, b) => a[0] - b[0]);
-  const left = sorted[0];
-  const right = sorted[sorted.length - 1];
-  const inset = Math.max(wall * 2.8, 8);
-  const z0 = -depth * 0.11;
-  const z1 = depth * 0.11;
-
-  addExtrudedPolygon(mesh, {
-    id: "production-left-open-triangular-shear-web",
-    group: "gusset",
-    points: [
-      offsetPointAlongSegment(left, skeleton.loadHub, inset),
-      [skeleton.loadHub[0] - wall * 0.75, skeleton.loadHub[1] - wall * 0.2],
-      [skeleton.lowerBridge[0] - wall * 0.7, skeleton.lowerBridge[1] + wall * 0.35]
-    ],
-    z0,
-    z1,
-    shade: 0.42
-  });
-
-  addExtrudedPolygon(mesh, {
-    id: "production-right-open-triangular-shear-web",
-    group: "gusset",
-    points: [
-      offsetPointAlongSegment(right, skeleton.loadHub, inset),
-      [skeleton.loadHub[0] + wall * 0.75, skeleton.loadHub[1] - wall * 0.2],
-      [skeleton.lowerBridge[0] + wall * 0.7, skeleton.lowerBridge[1] + wall * 0.35]
-    ],
-    z0,
-    z1,
-    shade: 0.42
-  });
-}
-
-function addFlatBossPad(
-  mesh: MeshBuilder,
-  options: {
-    id: string;
-    group: string;
-    center: Vec3;
-    radiusX: number;
-    radiusY: number;
-    depth: number;
-    segments: number;
-    shade: number;
-  }
-) {
-  const start = mesh.vertices.length;
-  const z0 = options.center[2] - options.depth / 2;
-  const z1 = options.center[2] + options.depth / 2;
-
-  for (const z of [z0, z1]) {
-    mesh.vertices.push([options.center[0], options.center[1], z]);
-    for (let index = 0; index < options.segments; index += 1) {
-      const angle = (Math.PI * 2 * index) / options.segments;
-      mesh.vertices.push([
-        options.center[0] + Math.cos(angle) * options.radiusX,
-        options.center[1] + Math.sin(angle) * options.radiusY,
-        z
-      ]);
-    }
-  }
-
-  const backCenter = start;
-  const backRing = start + 1;
-  const frontCenter = start + 1 + options.segments;
-  const frontRing = frontCenter + 1;
-
-  for (let index = 0; index < options.segments; index += 1) {
-    const next = (index + 1) % options.segments;
-    addFace(mesh, [frontCenter, frontRing + index, frontRing + next], options.group, options.shade * 1.08);
-    addFace(mesh, [backCenter, backRing + next, backRing + index], options.group, options.shade * 0.78);
-    addFace(mesh, [backRing + index, backRing + next, frontRing + next, frontRing + index], options.group, options.shade * 0.9);
-  }
-
-  mesh.features.push({
-    type: options.group,
-    id: options.id,
-    center: options.center,
-    size: [options.radiusX * 2, options.radiusY * 2, options.depth]
-  } as RenderableMeshFeature);
-}
-
-function addExtrudedPolygon(
-  mesh: MeshBuilder,
-  options: {
-    id: string;
-    group: string;
-    points: Array<[number, number]>;
-    z0: number;
-    z1: number;
-    shade: number;
-  }
-) {
-  if (options.points.length < 3) return;
-
-  const start = mesh.vertices.length;
-  for (const [x, y] of options.points) {
-    mesh.vertices.push([x, y, options.z0]);
-  }
-  for (const [x, y] of options.points) {
-    mesh.vertices.push([x, y, options.z1]);
-  }
-
-  for (let index = 1; index < options.points.length - 1; index += 1) {
-    addFace(mesh, [start, start + index, start + index + 1], options.group, options.shade * 0.72);
-    addFace(mesh, [start + options.points.length, start + options.points.length + index + 1, start + options.points.length + index], options.group, options.shade * 1.05);
-  }
-
-  for (let index = 0; index < options.points.length; index += 1) {
-    const next = (index + 1) % options.points.length;
-    addFace(mesh, [start + index, start + next, start + options.points.length + next, start + options.points.length + index], options.group, options.shade * 0.86);
-  }
-
-  const center = options.points.reduce(
-    (sum, point) => [sum[0] + point[0], sum[1] + point[1]] as [number, number],
-    [0, 0] as [number, number]
-  );
-
-  mesh.features.push({
-    type: options.group,
-    id: options.id,
-    center: [center[0] / options.points.length, center[1] / options.points.length, (options.z0 + options.z1) / 2],
-    size: [0, 0, Math.abs(options.z1 - options.z0)]
-  } as RenderableMeshFeature);
-}
-
-type DensitySkeletonNode = {
-  id: string;
-  point: [number, number];
-  radius: number;
-  group: string;
-};
-
-type DensitySkeletonPath = {
-  id: string;
-  from: [number, number];
-  control: [number, number];
-  to: [number, number];
-  thickness: number;
-  group: string;
-  shade: number;
-};
-
-type DensitySkeleton = {
-  nodes: DensitySkeletonNode[];
-  paths: DensitySkeletonPath[];
-};
-
-function extractDensitySkeleton(args: {
-  density: number[][][];
-  occupied: boolean[][][];
-  width: number;
-  height: number;
-  depth: number;
-  wall: number;
-  boltPositions: Array<[number, number]>;
-  loadPoints: Array<[number, number]>;
-  requirements: StructuralBracketRequirements;
-}): DensitySkeleton {
-  const { density, width, height, wall, boltPositions, loadPoints, requirements } = args;
-  const boltCenter = averagePoints(boltPositions);
-  const loadCenter = averagePoints(loadPoints);
-  const densityCentroid = weightedDensityCentroid(density, width, height);
-  const loadScale = clamp(requirements.loadCase.forceN / 2500, 0.75, 1.65);
-  const vibrationScale = clamp((requirements.loadCase.vibrationHz ?? 0) / 150, 0, 1.4);
-  const baseThickness = Math.max(wall * 1.18, Math.min(width, height) * 0.042) * loadScale;
-  const coreNode: [number, number] = [
-    clamp(densityCentroid[0] * 0.45 + boltCenter[0] * 0.2 + loadCenter[0] * 0.35, -width * 0.22, width * 0.22),
-    clamp(densityCentroid[1] * 0.45 + boltCenter[1] * 0.2 + loadCenter[1] * 0.35, -height * 0.14, height * 0.24)
-  ];
-  const upperNode: [number, number] = [
-    clamp(loadCenter[0], -width * 0.18, width * 0.18),
-    clamp(loadCenter[1] - height * 0.045, -height * 0.04, height * 0.34)
-  ];
-  const nodes: DensitySkeletonNode[] = [
-    { id: "fenics-core-density-node", point: coreNode, radius: baseThickness * 1.18, group: "rib" },
-    { id: "fenics-upper-load-node", point: upperNode, radius: baseThickness * 0.96, group: "load-plate" }
-  ];
-  const paths: DensitySkeletonPath[] = [];
-
-  boltPositions.forEach((bolt, index) => {
-    const start = offsetPointAlongSegment(bolt, coreNode, Math.max(wall * 2.2, baseThickness * 1.35));
-    const side = bolt[0] < coreNode[0] ? -1 : 1;
-    const control = densityGuidedControlPoint({
-      density,
-      width,
-      height,
-      from: start,
-      to: coreNode,
-      preferredOffset: [side * width * 0.055, height * 0.055]
-    });
-    const localDensity = sampleDensityAtPoint(density, (start[0] + coreNode[0]) / 2, (start[1] + coreNode[1]) / 2, width, height);
-
-    paths.push({
-      id: `fenics-primary-bolt-${index + 1}-to-core`,
-      from: start,
-      control,
-      to: coreNode,
-      thickness: baseThickness * clamp(0.9 + localDensity * 0.42, 0.82, 1.38),
-      group: "diagonal-web",
-      shade: 0.68
-    });
-  });
-
-  paths.push({
-    id: "fenics-core-to-load-node",
-    from: coreNode,
-    control: densityGuidedControlPoint({
-      density,
-      width,
-      height,
-      from: coreNode,
-      to: upperNode,
-      preferredOffset: [0, height * 0.035]
-    }),
-    to: upperNode,
-    thickness: baseThickness * 0.92,
-    group: "diagonal-web",
-    shade: 0.72
-  });
-
-  loadPoints.forEach((loadPoint, index) => {
-    const end = offsetPointAlongSegment(loadPoint, upperNode, Math.max(wall * 1.7, baseThickness * 0.7));
-    paths.push({
-      id: `fenics-load-spreader-${index + 1}`,
-      from: upperNode,
-      control: [(upperNode[0] + end[0]) / 2, (upperNode[1] + end[1]) / 2 + height * 0.018],
-      to: end,
-      thickness: baseThickness * 0.58,
-      group: "gusset",
-      shade: 0.6
-    });
-  });
-
-  if (boltPositions.length >= 2) {
-    const sortedBolts = [...boltPositions].sort((a, b) => a[0] - b[0]);
-    for (let index = 0; index < sortedBolts.length - 1; index += 1) {
-      const left = sortedBolts[index];
-      const right = sortedBolts[index + 1];
-      const leftStart = offsetPointAlongSegment(left, right, Math.max(wall * 2.0, baseThickness * 1.15));
-      const rightStart = offsetPointAlongSegment(right, left, Math.max(wall * 2.0, baseThickness * 1.15));
-      paths.push({
-        id: `fenics-bolt-tension-bridge-${index + 1}`,
-        from: leftStart,
-        control: [(leftStart[0] + rightStart[0]) / 2, Math.min(leftStart[1], rightStart[1]) - height * 0.035],
-        to: rightStart,
-        thickness: baseThickness * 0.48,
-        group: "rib",
-        shade: 0.52
-      });
-    }
-  }
-
-  if (vibrationScale > 0.2) {
-    const stabilizerY = clamp(coreNode[1] - height * 0.075, -height * 0.24, height * 0.1);
-    paths.push({
-      id: "fenics-vibration-cross-stabilizer",
-      from: [-width * 0.31, stabilizerY],
-      control: [0, stabilizerY + height * 0.04],
-      to: [width * 0.31, stabilizerY + height * 0.055],
-      thickness: baseThickness * (0.32 + vibrationScale * 0.15),
-      group: "rib",
-      shade: 0.48
-    });
-  }
-
-  return { nodes, paths };
-}
-
-function addPerimeterReferenceFrame(mesh: MeshBuilder, args: { width: number; height: number; depth: number; wall: number; railHeight: number; requirements: StructuralBracketRequirements }) {
-  const { width, height, depth, wall, railHeight, requirements } = args;
-  const frameDepth = depth * 0.62;
-  const bottomRailHeight = Math.max(wall * 1.45, railHeight * 0.34);
-  const topRailHeight = Math.max(wall * 1.35, railHeight * 0.3);
-  const bottomRailWidth = width * 0.82;
-  const topRailWidth = requirements.loadCase.direction === "lateral" ? width * 0.3 : width * 0.48;
-
-  addBoxFeature(mesh, {
-    id: "manufacturable-bottom-mounting-land",
-    group: "mounting-plate",
-    min: [-bottomRailWidth / 2, -height / 2 + railHeight * 0.18, -frameDepth / 2],
-    max: [bottomRailWidth / 2, -height / 2 + railHeight * 0.18 + bottomRailHeight, frameDepth / 2],
-    shade: 0.54
-  });
-
-  addBoxFeature(mesh, {
-    id: "manufacturable-top-load-land",
-    group: "load-plate",
-    min: [-topRailWidth / 2, height / 2 - railHeight * 0.66, -frameDepth / 2],
-    max: [topRailWidth / 2, height / 2 - railHeight * 0.66 + topRailHeight, frameDepth / 2],
-    shade: 0.6
-  });
-}
-
-function addDensityReconstructedSkeleton(mesh: MeshBuilder, args: { width: number; height: number; depth: number; wall: number; density: number[][][]; skeleton: DensitySkeleton; boltPositions: Array<[number, number]>; loadPoints: Array<[number, number]>; requirements: StructuralBracketRequirements }) {
-  const { width, height, depth, density, skeleton } = args;
-  const memberDepth = depth * 0.78;
-
-  for (const node of skeleton.nodes) {
-    const densityAtNode = sampleDensityAtPoint(density, node.point[0], node.point[1], width, height);
-    addOrganicNodePad(mesh, {
-      id: node.id,
-      group: node.group,
-      center: [node.point[0], node.point[1], 0],
-      radius: node.radius * clamp(0.78 + densityAtNode * 0.38, 0.72, 1.24),
-      depth: memberDepth,
-      segments: 28,
-      shade: node.group === "load-plate" ? 0.72 : 0.64
-    });
-  }
-
-  skeleton.paths.forEach((path) => addOrganicPathFeature(mesh, { ...path, density, width, height, depth: memberDepth }));
-}
-
-function addOrganicPathFeature(mesh: MeshBuilder, options: DensitySkeletonPath & { density: number[][][]; width: number; height: number; depth: number }) {
-  const curveSegments = 14;
-  const ringSegments = 14;
-  const points: Array<{ point: Vec3; radiusXy: number; radiusZ: number; shade: number }> = [];
-
-  for (let index = 0; index <= curveSegments; index += 1) {
-    const t = index / curveSegments;
-    const [x, y] = quadraticPoint(options.from, options.control, options.to, t);
-    const densityValue = sampleDensityAtPoint(options.density, x, y, options.width, options.height);
-    const endTaper = 0.82 + Math.sin(Math.PI * t) * 0.28;
-    const localRadius = (options.thickness / 2) * clamp(0.76 + densityValue * 0.62, 0.72, 1.48) * endTaper;
-
-    points.push({
-      point: [x, y, 0],
-      radiusXy: localRadius,
-      radiusZ: Math.max(options.depth * 0.23, localRadius * 1.35),
-      shade: options.shade + densityValue * 0.12
-    });
-  }
-
-  addSweptOrganicTube(mesh, {
-    id: options.id,
-    group: options.group,
-    points,
-    ringSegments
-  });
-}
-
-function addSweptOrganicTube(
-  mesh: MeshBuilder,
-  options: {
-    id: string;
-    group: string;
-    points: Array<{ point: Vec3; radiusXy: number; radiusZ: number; shade: number }>;
-    ringSegments: number;
-  }
-) {
-  if (options.points.length < 2) return;
-
-  const ringStarts: number[] = [];
-
-  for (let index = 0; index < options.points.length; index += 1) {
-    const current = options.points[index];
-    const previous = options.points[Math.max(0, index - 1)].point;
-    const next = options.points[Math.min(options.points.length - 1, index + 1)].point;
-    const tangent = normalize2d([next[0] - previous[0], next[1] - previous[1]]);
-    const normal: [number, number] = [-tangent[1], tangent[0]];
-    const start = mesh.vertices.length;
-    ringStarts.push(start);
-
-    for (let segment = 0; segment < options.ringSegments; segment += 1) {
-      const angle = (Math.PI * 2 * segment) / options.ringSegments;
-      const organicRipple = 1 + Math.sin(segment * 1.73 + index * 0.41) * 0.035;
-      const radial = Math.cos(angle) * current.radiusXy * organicRipple;
-      const vertical = Math.sin(angle) * current.radiusZ * organicRipple;
-
-      mesh.vertices.push([
-        current.point[0] + normal[0] * radial,
-        current.point[1] + normal[1] * radial,
-        current.point[2] + vertical
-      ]);
-    }
-  }
-
-  for (let ring = 0; ring < ringStarts.length - 1; ring += 1) {
-    const a = ringStarts[ring];
-    const b = ringStarts[ring + 1];
-    const shade = (options.points[ring].shade + options.points[ring + 1].shade) / 2;
-
-    for (let segment = 0; segment < options.ringSegments; segment += 1) {
-      const next = (segment + 1) % options.ringSegments;
-      addFace(mesh, [a + segment, a + next, b + next, b + segment], options.group, shade);
-    }
-  }
-
-  const firstCenter = mesh.vertices.length;
-  mesh.vertices.push(options.points[0].point);
-  const lastCenter = mesh.vertices.length;
-  mesh.vertices.push(options.points[options.points.length - 1].point);
-  const firstRing = ringStarts[0];
-  const lastRing = ringStarts[ringStarts.length - 1];
-
-  for (let segment = 0; segment < options.ringSegments; segment += 1) {
-    const next = (segment + 1) % options.ringSegments;
-    addFace(mesh, [firstCenter, firstRing + next, firstRing + segment], options.group, options.points[0].shade * 0.84);
-    addFace(mesh, [lastCenter, lastRing + segment, lastRing + next], options.group, options.points[options.points.length - 1].shade * 1.06);
-  }
-
-  const startPoint = options.points[0].point;
-  const endPoint = options.points[options.points.length - 1].point;
-  const length = Math.hypot(endPoint[0] - startPoint[0], endPoint[1] - startPoint[1], endPoint[2] - startPoint[2]);
-
-  mesh.features.push({
-    type: options.group,
-    id: options.id,
-    center: [(startPoint[0] + endPoint[0]) / 2, (startPoint[1] + endPoint[1]) / 2, (startPoint[2] + endPoint[2]) / 2],
-    size: [length, options.points[Math.floor(options.points.length / 2)].radiusXy * 2, options.points[Math.floor(options.points.length / 2)].radiusZ * 2],
-    rotationDeg: Math.atan2(endPoint[1] - startPoint[1], endPoint[0] - startPoint[0]) * (180 / Math.PI)
-  } as RenderableMeshFeature);
-}
-
-function addOrganicNodePad(mesh: MeshBuilder, options: { id: string; group: string; center: Vec3; radius: number; depth: number; segments: number; shade: number }) {
-  const rings = 8;
-  const segments = Math.max(options.segments, 24);
-  const start = mesh.vertices.length;
-
-  for (let ring = 0; ring <= rings; ring += 1) {
-    const v = ring / rings;
-    const polar = -Math.PI / 2 + Math.PI * v;
-    const z = options.center[2] + Math.sin(polar) * options.depth * 0.5;
-    const ringRadius = options.radius * Math.cos(polar) * (0.96 + 0.04 * Math.sin(ring * 1.27));
-
-    for (let segment = 0; segment < segments; segment += 1) {
-      const angle = (Math.PI * 2 * segment) / segments;
-      const organicRadius = ringRadius * (0.96 + 0.055 * Math.sin(segment * 1.7 + ring * 0.61));
-      mesh.vertices.push([
-        options.center[0] + Math.cos(angle) * organicRadius,
-        options.center[1] + Math.sin(angle) * organicRadius,
-        z
-      ]);
-    }
-  }
-
-  for (let ring = 0; ring < rings; ring += 1) {
-    const a = start + ring * segments;
-    const b = start + (ring + 1) * segments;
-    const shade = options.shade * (0.82 + (ring / rings) * 0.28);
-
-    for (let segment = 0; segment < segments; segment += 1) {
-      const next = (segment + 1) % segments;
-      addFace(mesh, [a + segment, a + next, b + next, b + segment], options.group, shade);
-    }
-  }
-
-  mesh.features.push({
-    type: options.group,
-    id: options.id,
-    center: options.center,
-    diameterMm: options.radius * 2,
-    throughAxis: "z"
-  } as RenderableMeshFeature);
-}
-
-function normalize2d(vector: [number, number]): [number, number] {
-  const length = Math.max(Math.hypot(vector[0], vector[1]), 0.000001);
-  return [vector[0] / length, vector[1] / length];
-}
-
-function quadraticPoint(from: [number, number], control: [number, number], to: [number, number], t: number): [number, number] {
-  const oneMinusT = 1 - t;
-  return [oneMinusT * oneMinusT * from[0] + 2 * oneMinusT * t * control[0] + t * t * to[0], oneMinusT * oneMinusT * from[1] + 2 * oneMinusT * t * control[1] + t * t * to[1]];
-}
-
-function averagePoints(points: Array<[number, number]>): [number, number] {
-  if (!points.length) return [0, 0];
-  const sum = points.reduce((current, point) => [current[0] + point[0], current[1] + point[1]] as [number, number], [0, 0] as [number, number]);
-  return [sum[0] / points.length, sum[1] / points.length];
-}
-
-function offsetPointAlongSegment(from: [number, number], to: [number, number], distance: number): [number, number] {
-  const dx = to[0] - from[0];
-  const dy = to[1] - from[1];
-  const length = Math.max(Math.hypot(dx, dy), 0.0001);
-  const t = clamp(distance / length, 0, 0.86);
-  return [from[0] + dx * t, from[1] + dy * t];
-}
-
-function weightedDensityCentroid(density: number[][][], width: number, height: number): [number, number] {
-  const nx = density.length;
-  const ny = density[0]?.length ?? 1;
-  const nz = density[0]?.[0]?.length ?? 1;
-  let weightedX = 0;
-  let weightedY = 0;
-  let total = 0;
-  for (let x = 0; x < nx; x += 1) {
-    const xMm = -width / 2 + ((x + 0.5) / nx) * width;
-    for (let y = 0; y < ny; y += 1) {
-      const yMm = -height / 2 + ((y + 0.5) / ny) * height;
-      let columnWeight = 0;
-      for (let z = 0; z < nz; z += 1) columnWeight += Number.isFinite(density[x][y][z]) ? clamp(density[x][y][z], 0, 1) : 0;
-      weightedX += xMm * columnWeight;
-      weightedY += yMm * columnWeight;
-      total += columnWeight;
-    }
-  }
-  if (total <= 0) return [0, 0];
-  return [weightedX / total, weightedY / total];
-}
-
-function densityGuidedControlPoint(args: { density: number[][][]; width: number; height: number; from: [number, number]; to: [number, number]; preferredOffset: [number, number] }): [number, number] {
-  const center: [number, number] = [(args.from[0] + args.to[0]) / 2, (args.from[1] + args.to[1]) / 2];
-  const candidates: Array<[number, number]> = [[center[0] + args.preferredOffset[0], center[1] + args.preferredOffset[1]], [center[0] - args.preferredOffset[0] * 0.65, center[1] + args.preferredOffset[1] * 0.55], center];
-  return candidates.sort((a, b) => sampleDensityAtPoint(args.density, b[0], b[1], args.width, args.height) - sampleDensityAtPoint(args.density, a[0], a[1], args.width, args.height))[0];
-}
-
-function sampleDensityAtPoint(density: number[][][], xMm: number, yMm: number, widthMm: number, heightMm: number) {
-  const nx = density.length;
-  const ny = density[0]?.length ?? 1;
-  const nz = density[0]?.[0]?.length ?? 1;
-  const xIndex = clamp(Math.round(((xMm + widthMm / 2) / Math.max(widthMm, 1)) * (nx - 1)), 0, nx - 1);
-  const yIndex = clamp(Math.round(((yMm + heightMm / 2) / Math.max(heightMm, 1)) * (ny - 1)), 0, ny - 1);
-  let total = 0;
-  for (let z = 0; z < nz; z += 1) {
-    const raw = density[xIndex]?.[yIndex]?.[z] ?? 0;
-    total += typeof raw === "number" && Number.isFinite(raw) ? clamp(raw, 0, 1) : 0;
-  }
-  return total / Math.max(nz, 1);
-}
-
-function densityToOccupancy(density: number[][][], threshold: number) {
-  return density.map((plane) => plane.map((row) => row.map((value) => Number.isFinite(value) && value >= threshold)));
-}
-
-function carveCylindricalVoids(
-  occupied: boolean[][][],
-  args: { width: number; height: number; boltPositions: Array<[number, number]>; radiusMm: number }
-) {
-  const nx = occupied.length;
-  const ny = occupied[0]?.length ?? 0;
-  const nz = occupied[0]?.[0]?.length ?? 0;
-
-  for (let x = 0; x < nx; x += 1) {
-    const xMm = -args.width / 2 + ((x + 0.5) / nx) * args.width;
-    for (let y = 0; y < ny; y += 1) {
-      const yMm = -args.height / 2 + ((y + 0.5) / ny) * args.height;
-      const inside = args.boltPositions.some(([bx, by]) => distance2d(xMm, yMm, bx, by) <= args.radiusMm);
-      if (!inside) continue;
-      for (let z = 0; z < nz; z += 1) {
-        occupied[x][y][z] = false;
-      }
-    }
-  }
-}
-
-function enforceAnchorPads(
-  occupied: boolean[][][],
-  args: {
-    width: number;
-    height: number;
-    boltPositions: Array<[number, number]>;
-    loadPoints: Array<[number, number]>;
-    boltPadRadiusMm: number;
-    loadPadRadiusMm: number;
-  }
-) {
-  const nx = occupied.length;
-  const ny = occupied[0]?.length ?? 0;
-  const nz = occupied[0]?.[0]?.length ?? 0;
-
-  for (let x = 0; x < nx; x += 1) {
-    const xMm = -args.width / 2 + ((x + 0.5) / nx) * args.width;
-    for (let y = 0; y < ny; y += 1) {
-      const yMm = -args.height / 2 + ((y + 0.5) / ny) * args.height;
-      const nearBolt = args.boltPositions.some(([bx, by]) => distance2d(xMm, yMm, bx, by) <= args.boltPadRadiusMm);
-      const nearLoad = args.loadPoints.some(([lx, ly]) => distance2d(xMm, yMm, lx, ly) <= args.loadPadRadiusMm);
-      if (!nearBolt && !nearLoad) continue;
-      for (let z = 0; z < nz; z += 1) {
-        occupied[x][y][z] = true;
-      }
-    }
-  }
-}
-
-function addOccupiedVoxelSurface(
-  mesh: MeshBuilder,
-  args: {
-    occupied: boolean[][][];
-    width: number;
-    height: number;
-    depth: number;
-    cellWidth: number;
-    cellHeight: number;
-    cellDepth: number;
-  }
-) {
-  const { occupied, width, height, depth, cellWidth, cellHeight, cellDepth } = args;
-  const nx = occupied.length;
-  const ny = occupied[0]?.length ?? 0;
-  const nz = occupied[0]?.[0]?.length ?? 0;
-  const isSolid = (x: number, y: number, z: number) => x >= 0 && x < nx && y >= 0 && y < ny && z >= 0 && z < nz && occupied[x][y][z];
-
-  for (let x = 0; x < nx; x += 1) {
-    for (let y = 0; y < ny; y += 1) {
-      for (let z = 0; z < nz; z += 1) {
-        if (!occupied[x][y][z]) continue;
-        const x0 = -width / 2 + x * cellWidth;
-        const x1 = x0 + cellWidth;
-        const y0 = -height / 2 + y * cellHeight;
-        const y1 = y0 + cellHeight;
-        const z0 = -depth / 2 + z * cellDepth;
-        const z1 = z0 + cellDepth;
-        const shade = 0.54 + (y / Math.max(ny - 1, 1)) * 0.22;
-
-        if (!isSolid(x - 1, y, z)) addQuad(mesh, [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], "fenics-density", shade * 0.82);
-        if (!isSolid(x + 1, y, z)) addQuad(mesh, [[x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [x1, y0, z1]], "fenics-density", shade * 0.9);
-        if (!isSolid(x, y - 1, z)) addQuad(mesh, [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], "fenics-density", shade * 0.78);
-        if (!isSolid(x, y + 1, z)) addQuad(mesh, [[x0, y1, z0], [x0, y1, z1], [x1, y1, z1], [x1, y1, z0]], "fenics-density", shade * 1.02);
-        if (!isSolid(x, y, z - 1)) addQuad(mesh, [[x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [x1, y0, z0]], "fenics-density", shade * 0.7);
-        if (!isSolid(x, y, z + 1)) addQuad(mesh, [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], "fenics-density", shade * 1.1);
-      }
-    }
-  }
-
-  mesh.features.push({
-    type: "mounting-plate",
-    id: "fenics-density-surface",
-    center: [0, 0, 0],
-    size: [width, height, depth]
-  });
-}
-
-function buildLoadPoints(
-  width: number,
-  height: number,
-  wall: number,
+function coerceRenderableMesh(
+  response: SolverMeshResponse | undefined,
+  candidate: CandidateGeometry,
   requirements: StructuralBracketRequirements
-): Array<[number, number]> {
-  const topY = height / 2 - Math.max(wall * 2.4, height * 0.08);
-  const spread = requirements.loadCase.direction === "lateral" ? height * 0.22 : width * 0.18;
+): RenderableMesh | undefined {
+  if (!response) return undefined;
 
-  if (requirements.loadCase.direction === "lateral") {
-    return [[width * 0.38, height * 0.18], [width * 0.38, -height * 0.18]];
-  }
-  if (requirements.loadCase.direction === "multi-axis") {
-    return [[0, topY], [-spread, topY - height * 0.07], [spread, topY - height * 0.07]];
-  }
-  return [[0, topY], [-spread, topY], [spread, topY]];
-}
+  const rawMesh = response.renderMesh ?? response.mesh;
+  if (!isRecord(rawMesh)) return undefined;
 
-function addBoltHoleWallFeatures(
-  mesh: MeshBuilder,
-  args: { boltPositions: Array<[number, number]>; boltDiameterMm: number; depth: number; wall: number }
-) {
-  const holeRadius = Math.max(args.boltDiameterMm * 0.52, args.wall * 0.55);
-  const wallRadius = Math.max(args.boltDiameterMm * 1.05, args.wall * 1.35);
+  const vertices = coerceVertices(rawMesh.vertices);
+  const faces = coerceFaces(rawMesh.faces);
 
-  args.boltPositions.forEach(([x, y], index) => {
-    addOpenCylinderWall(mesh, {
-      id: `bolt-hole-${index + 1}`,
-      type: "bolt-hole",
-      center: [x, y, 0],
-      innerRadius: holeRadius,
-      outerRadius: wallRadius,
-      depth: args.depth,
-      segments: 32,
-      shade: 0.76
-    });
-  });
-}
-
-function addLoadInterfacePad(
-  mesh: MeshBuilder,
-  args: {
-    width: number;
-    height: number;
-    depth: number;
-    wall: number;
-    requirements: StructuralBracketRequirements;
-  }
-) {
-  const loadPadWidth = args.requirements.loadCase.direction === "lateral" ? args.width * 0.24 : args.width * 0.42;
-  const loadPadHeight = Math.max(args.wall * 2.2, args.height * 0.08);
-
-  addBoxFeature(mesh, {
-    id: "derived-load-interface-pad",
-    group: "load-plate",
-    min: [-loadPadWidth / 2, args.height / 2 - loadPadHeight * 1.25, -args.depth / 2],
-    max: [loadPadWidth / 2, args.height / 2 - loadPadHeight * 0.15, args.depth / 2],
-    shade: 0.82
-  });
-}
-
-function addOpenCylinderWall(
-  mesh: MeshBuilder,
-  options: {
-    id: string;
-    type: "bolt-hole" | "lightening-hole";
-    center: Vec3;
-    innerRadius: number;
-    outerRadius: number;
-    depth: number;
-    segments: number;
-    shade: number;
-  }
-) {
-  const start = mesh.vertices.length;
-  const z0 = -options.depth / 2;
-  const z1 = options.depth / 2;
-
-  for (const z of [z0, z1]) {
-    for (const radius of [options.outerRadius, options.innerRadius]) {
-      for (let index = 0; index < options.segments; index += 1) {
-        const angle = (Math.PI * 2 * index) / options.segments;
-        mesh.vertices.push([options.center[0] + Math.cos(angle) * radius, options.center[1] + Math.sin(angle) * radius, z]);
-      }
-    }
-  }
-
-  const backOuter = start;
-  const backInner = start + options.segments;
-  const frontOuter = start + options.segments * 2;
-  const frontInner = start + options.segments * 3;
-
-  for (let index = 0; index < options.segments; index += 1) {
-    const next = (index + 1) % options.segments;
-    addFace(mesh, [backOuter + index, backOuter + next, frontOuter + next, frontOuter + index], "bolt-hole-wall", options.shade * 0.82);
-    addFace(mesh, [frontOuter + index, frontOuter + next, frontInner + next, frontInner + index], "bolt-hole-wall", options.shade * 1.12);
-    addFace(mesh, [backInner + index, frontInner + index, frontInner + next, backInner + next], "bolt-hole-wall", options.shade * 0.42);
-  }
-
-  mesh.features.push({
-    type: options.type,
-    id: options.id,
-    center: options.center,
-    diameterMm: options.innerRadius * 2,
-    throughAxis: "z"
-  });
-}
-
-function buildDeterministicFallbackMesh(candidate: CandidateGeometry, requirements: StructuralBracketRequirements): RenderableMesh {
-  const mesh = createMeshBuilder();
-  const width = candidate.widthMm;
-  const height = candidate.heightMm;
-  const depth = candidate.depthMm;
-  const wall = candidate.wallThicknessMm;
-  const rail = Math.max(wall * 2.2, height * 0.1);
-  const boltCount = clamp(Math.round(requirements.mounting.boltCount), 1, 12);
-  const boltPositions = buildBoltPositions(width, height, rail, boltCount);
-
-  addBoxFeature(mesh, { id: "fallback-frame-top", group: "load-plate", min: [-width / 2, height / 2 - rail, -depth / 2], max: [width / 2, height / 2, depth / 2], shade: 0.72 });
-  addBoxFeature(mesh, { id: "fallback-frame-bottom", group: "mounting-plate", min: [-width / 2, -height / 2, -depth / 2], max: [width / 2, -height / 2 + rail, depth / 2], shade: 0.64 });
-
-  boltPositions.forEach(([x, y], index) => {
-    addOpenCylinderWall(mesh, {
-      id: `fallback-bolt-${index + 1}`,
-      type: "bolt-hole",
-      center: [x, y, 0],
-      innerRadius: requirements.mounting.boltDiameterMm * 0.52,
-      outerRadius: requirements.mounting.boltDiameterMm * 1.15,
-      depth,
-      segments: 28,
-      shade: 0.72
-    });
-  });
+  if (vertices.length < 4 || faces.length < 1) return undefined;
 
   return {
     version: "haf-render-mesh-v1",
     units: "mm",
     family: candidate.family,
-    vertices: mesh.vertices,
-    faces: mesh.faces,
-    features: mesh.features,
-    bounds: { widthMm: width, heightMm: height, depthMm: depth },
+    vertices,
+    faces,
+    features: [],
+    bounds: {
+      widthMm: candidate.widthMm,
+      heightMm: candidate.heightMm,
+      depthMm: candidate.depthMm
+    },
     metadata: {
       candidateId: candidate.id,
       source: "generation-engine",
-      boltCount,
-      lighteningHoleCount: 0,
-      ribCount: 0,
-      gussetCount: 0,
-      diagonalWebCount: 0,
+      boltCount: requirements.mounting.boltCount,
       skeletonized: true
     }
   };
 }
 
-function buildBoltPositions(width: number, height: number, railHeight: number, boltCount: number): Array<[number, number]> {
-  const safeCount = Math.round(clamp(boltCount, 1, 12));
-  const xRadius = width * 0.34;
-  const yTop = height / 2 - railHeight * 0.54;
-  const yBottom = -height / 2 + railHeight * 0.54;
-  const yMid = -height * 0.02;
+function coerceVertices(value: unknown): Vec3[] {
+  if (!Array.isArray(value)) return [];
 
-  if (safeCount === 1) return [[0, yBottom]];
-  if (safeCount === 2) return [[-xRadius, yBottom], [xRadius, yBottom]];
-  if (safeCount === 3) return [[-xRadius, yBottom], [xRadius, yBottom], [0, yTop]];
-  if (safeCount === 4) return [[-xRadius, yTop], [xRadius, yTop], [-xRadius, yBottom], [xRadius, yBottom]];
-  if (safeCount === 5) return [[-xRadius, yTop], [xRadius, yTop], [-xRadius, yBottom], [xRadius, yBottom], [0, yMid]];
-  if (safeCount === 6) return [[-xRadius, yTop], [0, yTop], [xRadius, yTop], [-xRadius, yBottom], [0, yBottom], [xRadius, yBottom]];
-  if (safeCount === 8) return [
-    [-xRadius, yTop], [-xRadius * 0.34, yTop], [xRadius * 0.34, yTop], [xRadius, yTop],
-    [-xRadius, yBottom], [-xRadius * 0.34, yBottom], [xRadius * 0.34, yBottom], [xRadius, yBottom]
-  ];
-
-  const positions: Array<[number, number]> = [];
-  const rowCount = safeCount <= 7 ? 2 : 3;
-  const perRow = Math.ceil(safeCount / rowCount);
-  let remaining = safeCount;
-
-  for (let row = 0; row < rowCount; row += 1) {
-    const countThisRow = Math.min(perRow, remaining);
-    remaining -= countThisRow;
-    const rowY = rowCount === 2
-      ? (row === 0 ? yTop : yBottom)
-      : yTop - (row * (yTop - yBottom)) / 2;
-
-    for (let index = 0; index < countThisRow; index += 1) {
-      const t = countThisRow === 1 ? 0.5 : index / (countThisRow - 1);
-      positions.push([-xRadius + t * xRadius * 2, rowY]);
-    }
-  }
-
-  return positions.slice(0, safeCount);
-}
-function isValidDensityField(value: unknown): value is number[][][] {
-  if (!Array.isArray(value) || value.length === 0) return false;
-  if (!Array.isArray(value[0]) || value[0].length === 0) return false;
-  if (!Array.isArray(value[0][0]) || value[0][0].length === 0) return false;
-  return typeof value[0][0][0] === "number";
+  return value
+    .map((item) => {
+      if (!Array.isArray(item) || item.length < 3) return undefined;
+      const x = finiteOr(Number(item[0]), Number.NaN);
+      const y = finiteOr(Number(item[1]), Number.NaN);
+      const z = finiteOr(Number(item[2]), Number.NaN);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return undefined;
+      return [x, y, z] as Vec3;
+    })
+    .filter((item): item is Vec3 => Boolean(item));
 }
 
-function summarizeDensity(density: number[][][]): DensityStats {
-  let total = 0;
-  let solid = 0;
-  let sum = 0;
+function coerceFaces(value: unknown): RenderableMesh["faces"] {
+  if (!Array.isArray(value)) return [];
 
-  for (const plane of density) {
-    for (const row of plane) {
-      for (const raw of row) {
-        const value = Number.isFinite(raw) ? clamp(raw, 0, 1) : 0;
-        total += 1;
-        sum += value;
-        if (value >= DENSITY_THRESHOLD) solid += 1;
+  return value
+    .map((item) => {
+      if (Array.isArray(item)) {
+        const indices = item.map((entry) => Math.trunc(Number(entry))).filter(Number.isFinite);
+        return indices.length >= 3 ? { indices } : undefined;
       }
-    }
-  }
+
+      if (isRecord(item) && Array.isArray(item.indices)) {
+        const indices = item.indices.map((entry) => Math.trunc(Number(entry))).filter(Number.isFinite);
+        return indices.length >= 3
+          ? {
+              indices,
+              group: typeof item.group === "string" ? item.group : undefined,
+              shade: typeof item.shade === "number" ? item.shade : undefined
+            }
+          : undefined;
+      }
+
+      return undefined;
+    })
+    .filter((item): item is RenderableMesh["faces"][number] => Boolean(item));
+}
+
+function applySolverMetrics(
+  candidate: CandidateGeometry,
+  metrics: Record<string, unknown>,
+  mesh: RenderableMesh
+): CandidateGeometry {
+  const massKg = readMetric(metrics, ["massKg", "estimatedMassKg", "mass_kg"], candidate.estimatedMassKg);
+  const stressMpa = readMetric(metrics, ["maxStressMpa", "estimatedStressMpa", "stressMpa"], candidate.estimatedStressMpa);
+  const displacementMm = readMetric(metrics, ["maxDisplacementMm", "estimatedDisplacementMm", "displacementMm"], candidate.estimatedDisplacementMm);
+  const safetyFactor = readMetric(metrics, ["safetyFactor", "safetyFactorEstimate"], candidate.safetyFactorEstimate);
+  const openAreaPercent = readMetric(metrics, ["openAreaPercent", "voidPercent"], candidate.openAreaPercent ?? 0);
 
   return {
-    nx: density.length,
-    ny: density[0]?.length ?? 0,
-    nz: density[0]?.[0]?.length ?? 0,
-    solidVoxels: solid,
-    totalVoxels: total,
-    solidFraction: total > 0 ? solid / total : 0,
-    openAreaPercent: total > 0 ? ((total - solid) / total) * 100 : 0,
-    averageDensity: total > 0 ? sum / total : 0
+    ...candidate,
+    estimatedMassKg: roundTo(massKg, 0.001),
+    estimatedStressMpa: roundTo(stressMpa, 0.01),
+    estimatedDisplacementMm: roundTo(displacementMm, 0.0001),
+    safetyFactorEstimate: roundTo(safetyFactor, 0.01),
+    openAreaPercent: roundTo(openAreaPercent, 0.1),
+    renderMesh: mesh,
+    derivedParameters: {
+      ...candidate.derivedParameters,
+      solverVertexCount: mesh.vertices.length,
+      solverFaceCount: mesh.faces.length
+    }
   };
 }
 
-function buildStructuralValidations(
-  requirements: StructuralBracketRequirements,
-  selected: CandidateGeometry,
-  acceptedCount: number,
-  baselineComparison: BaselineComparison
-): ValidationMessage[] {
+function createNoGeometryResult(args: {
+  family: ComponentFamily;
+  requirements: StructuralBracketRequirements | BellNozzleRequirements;
+  candidate?: CandidateGeometry;
+  reason: string;
+  solverError: string;
+  rejectedCandidates?: CandidateGeometry[];
+}): GenerationResult {
+  const candidate = args.candidate ?? buildNoGeometryCandidate(args.family, args.requirements);
+  const rejectedCandidate: CandidateGeometry = {
+    ...candidate,
+    rejected: true,
+    rejectionReasons: candidate.rejectionReasons.length > 0
+      ? candidate.rejectionReasons
+      : ["NO_GEOMETRY_PRODUCED", args.solverError],
+    renderMesh: undefined,
+    derivedParameters: {
+      ...candidate.derivedParameters,
+      geometrySource: "none",
+      fakeGeometryDisabled: true,
+      noGeometryReason: args.reason,
+      solverError: args.solverError
+    }
+  };
+
+  const derived: DerivedGeometry = buildDerivedGeometry(rejectedCandidate, undefined);
+  const rejectedCandidates = args.rejectedCandidates ?? [rejectedCandidate];
+  const baselineComparison = buildBaselineComparison(undefined, 1, 1, 0);
+
+  return {
+    revision: "REQ-GEN-010-NO-FAKE-GEOMETRY",
+    exportState: "failed",
+    estimatedMassKg: 0,
+    estimatedBurn: 0,
+    geometry: {
+      silhouette: args.family,
+      material: rejectedCandidate.material,
+      lengthMm: rejectedCandidate.lengthMm,
+      widthMm: rejectedCandidate.widthMm,
+      heightMm: rejectedCandidate.heightMm,
+      depthMm: rejectedCandidate.depthMm,
+      wallThicknessMm: rejectedCandidate.wallThicknessMm,
+      skeletonized: false,
+      skeletonizationPolicy: "none",
+      openAreaPercent: 0,
+      loadPathContinuityScore: 0,
+      renderMesh: undefined,
+      derived,
+      candidates: {
+        evaluated: 1,
+        accepted: 0,
+        rejected: 1
+      },
+      notes: [
+        "NO GEOMETRY PRODUCED.",
+        args.reason,
+        "The generation engine intentionally refused to create decorative TypeScript fallback geometry.",
+        `Solver issue: ${args.solverError}`,
+        "Next required backend step: return a real mesh from /topology/optimize or /topology/mesh, then validate it through Gmsh/CalculiX."
+      ]
+    },
+    validations: buildNoGeometryValidations(args.reason, args.solverError),
+    derived,
+    candidatesEvaluated: 1,
+    candidatesAccepted: 0,
+    candidatesRejected: 1,
+    selectedCandidate: rejectedCandidate,
+    rejectedCandidates,
+    baselineComparison,
+    fabricationReview: {
+      supportRemovalDifficulty: "unknown",
+      notes:
+        "No fabrication review is available because no solver-derived geometry was produced. This is intentional; fake preview geometry is disabled."
+    }
+  };
+}
+
+function buildNoGeometryValidations(reason: string, solverError: string): ValidationMessage[] {
   return [
     {
-      severity: acceptedCount > 0 ? "success" : "warning",
-      title: acceptedCount > 0 ? "Candidate Search Complete" : "Fallback Candidate Selected",
+      severity: "error",
+      title: "No solver-derived geometry produced",
+      text: reason
+    },
+    {
+      severity: "error",
+      title: "Fake geometry disabled",
       text:
-        acceptedCount > 0
-          ? `${acceptedCount} candidates satisfied first-pass envelope, manufacturability, and safety filters.`
-          : "No candidates fully satisfied all filters. The best-scoring fallback candidate was selected."
+        "The generation engine no longer creates hand-built preview brackets when FEniCS/Gmsh/CalculiX do not return a displayable mesh."
     },
     {
-      severity: selected.safetyFactorEstimate >= requirements.safetyFactor ? "success" : "warning",
-      title: "Best Candidate Selected",
-      text: `Selected ${selected.id} with score ${selected.totalScore.toFixed(1)}/100, mass ${selected.estimatedMassKg.toFixed(3)} kg, stress ${selected.estimatedStressMpa.toFixed(1)} MPa, displacement ${selected.estimatedDisplacementMm.toFixed(4)} mm, and safety factor ${selected.safetyFactorEstimate.toFixed(2)}.`
-    },
-    {
-      severity: selected.renderMesh ? "success" : "warning",
-      title: "FEniCS Density Geometry Generated",
-      text: selected.renderMesh
-        ? `The selected candidate includes a renderable FEniCS-driven mesh with ${selected.renderMesh.vertices.length} vertices and ${selected.renderMesh.faces.length} faces.`
-        : "The selected candidate does not include renderable mesh data."
-    },
-    {
-      severity: baselineComparison.avoidedSimulationRuns > 0 ? "success" : "warning",
-      title: "Baseline Comparison",
-      text: `Constraint filtering avoided ${baselineComparison.avoidedSimulationRuns} estimated simulation runs compared with the unconstrained baseline.`
+      severity: "warning",
+      title: "Backend contract required",
+      text: `Solver must return renderMesh or mesh with vertices and faces. Current issue: ${solverError}`
     }
   ];
 }
 
-function evaluateStructuralCandidateForReview(candidate: CandidateGeometry, requirements: StructuralBracketRequirements): string[] {
-  const reasons: string[] = [];
-  const basePadRequirement = requirements.mounting.spacingMm + requirements.mounting.boltDiameterMm * 3.2;
+function buildSingleAuthoritativeCandidate(
+  family: ComponentFamily,
+  requirements: StructuralBracketRequirements
+): CandidateGeometry {
+  const widthMm = Math.max(
+    requirements.envelope.maxWidthMm * 0.72,
+    requirements.mounting.spacingMm + requirements.mounting.boltDiameterMm * 4.2
+  );
+  const heightMm = Math.max(requirements.envelope.maxHeightMm * 0.48, requirements.mounting.boltDiameterMm * 7);
+  const depthMm = Math.max(requirements.envelope.maxDepthMm * 0.66, requirements.mounting.boltDiameterMm * 3);
+  const wallThicknessMm = requirements.manufacturing.minWallThicknessMm;
+  const targetOpenAreaPercent = requirements.objectives.targetOpenAreaPercent ?? 55;
+  const material = selectMaterialName(requirements);
+  const estimatedMassKg = estimateBracketMassKg(widthMm, heightMm, depthMm, wallThicknessMm, targetOpenAreaPercent, material);
+  const estimatedStressMpa = estimateStressMpa(requirements, widthMm, wallThicknessMm);
+  const safetyFactorEstimate = estimateSafetyFactor(material, estimatedStressMpa);
 
-  if (candidate.widthMm > requirements.envelope.maxWidthMm) reasons.push("Exceeds maximum width envelope.");
-  if (candidate.heightMm > requirements.envelope.maxHeightMm) reasons.push("Exceeds maximum height envelope.");
-  if (candidate.depthMm > requirements.envelope.maxDepthMm) reasons.push("Exceeds maximum depth envelope.");
-  if (candidate.widthMm < basePadRequirement) reasons.push("Bolt pattern does not fit generated base width.");
-  if (candidate.wallThicknessMm < requirements.manufacturing.minWallThicknessMm) reasons.push("Wall thickness below manufacturing minimum.");
-  if (candidate.safetyFactorEstimate < requirements.safetyFactor) reasons.push("Estimated safety factor below requirement.");
-  if (candidate.manufacturabilityScore < 48) reasons.push("Manufacturability score below threshold.");
-
-  const targetMass = requirements.objectives.targetMassKg;
-  if (targetMass && candidate.estimatedMassKg > targetMass * 1.75) reasons.push("Mass exceeds target mass tolerance.");
-
-  return reasons;
+  return {
+    id: "solver_structural_bracket_cand_001",
+    family,
+    material,
+    widthMm: roundTo(widthMm, 0.1),
+    heightMm: roundTo(heightMm, 0.1),
+    depthMm: roundTo(depthMm, 0.1),
+    lengthMm: roundTo(Math.max(widthMm, heightMm), 0.1),
+    wallThicknessMm: roundTo(wallThicknessMm, 0.1),
+    estimatedMassKg,
+    estimatedStressMpa,
+    estimatedDisplacementMm: roundTo(requirements.loadCase.forceN / Math.max(widthMm * wallThicknessMm * 18, 1), 0.0001),
+    safetyFactorEstimate,
+    manufacturabilityScore: 0,
+    supportBurdenScore: 0,
+    performanceScore: 0,
+    totalScore: 0,
+    rejected: false,
+    rejectionReasons: [],
+    skeletonized: true,
+    skeletonizationPolicy: "fenics-density",
+    openAreaPercent: targetOpenAreaPercent,
+    latticeCellCount: 0,
+    loadPathContinuityScore: 0,
+    renderMesh: undefined,
+    derivedParameters: {
+      geometrySource: "pending-authoritative-solver-mesh",
+      fakeGeometryDisabled: true,
+      boltCount: requirements.mounting.boltCount,
+      boltDiameterMm: requirements.mounting.boltDiameterMm,
+      boltSpacingMm: requirements.mounting.spacingMm,
+      targetOpenAreaPercent,
+      loadDirection: requirements.loadCase.direction,
+      forceN: requirements.loadCase.forceN,
+      safetyFactor: requirements.safetyFactor,
+      solverRequired: true
+    }
+  };
 }
 
-function createEmergencyStructuralCandidate(family: ComponentFamily, requirements: StructuralBracketRequirements): CandidateGeometry {
+function buildNoGeometryCandidate(
+  family: ComponentFamily,
+  requirements: StructuralBracketRequirements | BellNozzleRequirements
+): CandidateGeometry {
+  if (isStructuralRequirements(requirements)) {
+    return buildSingleAuthoritativeCandidate(family, requirements);
+  }
+
   return {
-    id: "emergency_fenics_structural_candidate",
+    id: "no_solver_geometry_cand_001",
     family,
-    material: "Ti-6Al-4V",
-    widthMm: requirements.envelope.maxWidthMm,
-    heightMm: requirements.envelope.maxHeightMm * 0.7,
-    depthMm: requirements.envelope.maxDepthMm * 0.7,
-    lengthMm: requirements.envelope.maxWidthMm,
+    material: "solver-required",
+    widthMm: requirements.envelope.maxExitDiameterMm,
+    heightMm: requirements.envelope.maxExitDiameterMm,
+    depthMm: requirements.envelope.maxLengthMm,
+    lengthMm: requirements.envelope.maxLengthMm,
     wallThicknessMm: requirements.manufacturing.minWallThicknessMm,
     estimatedMassKg: 0,
     estimatedStressMpa: 0,
@@ -2643,306 +589,234 @@ function createEmergencyStructuralCandidate(family: ComponentFamily, requirement
     performanceScore: 0,
     totalScore: 0,
     rejected: true,
-    rejectionReasons: ["Emergency fallback candidate created because no generated candidates were available."],
-    skeletonized: true,
-    skeletonizationPolicy: "fenics-density",
+    rejectionReasons: ["NO_SOLVER_PIPELINE_FOR_COMPONENT"],
+    skeletonized: false,
+    skeletonizationPolicy: "none",
     openAreaPercent: 0,
     latticeCellCount: 0,
     loadPathContinuityScore: 0,
-    derivedParameters: {}
-  };
-}
-
-function generateBellNozzle(requirements: BellNozzleRequirements): GenerationResult {
-  const selected = createNozzleCandidate(requirements);
-  const selectedWithMesh: CandidateGeometry = {
-    ...selected,
-    renderMesh: buildNozzleRenderMesh(selected, requirements)
-  };
-
-  const derived: DerivedGeometry = {
-    widthMm: selectedWithMesh.widthMm,
-    heightMm: selectedWithMesh.heightMm,
-    depthMm: selectedWithMesh.depthMm,
-    lengthMm: selectedWithMesh.lengthMm,
-    wallThicknessMm: selectedWithMesh.wallThicknessMm,
-    material: selectedWithMesh.material,
-    estimatedMassKg: selectedWithMesh.estimatedMassKg,
-    selectedCandidateId: selectedWithMesh.id,
-    skeletonized: false,
-    skeletonizationPolicy: "sealed-required",
-    openAreaPercent: 0,
-    latticeCellCount: 0,
-    loadPathContinuityScore: 100,
-    renderMesh: selectedWithMesh.renderMesh,
-    derivedParameters: selectedWithMesh.derivedParameters
-  };
-
-  return {
-    revision: "REQ-GEN-006-SEALED-NOZZLE-MESH",
-    exportState: "idle",
-    estimatedMassKg: selectedWithMesh.estimatedMassKg,
-    estimatedBurn: 18,
-    geometry: {
-      silhouette: "bell-nozzle",
-      material: selectedWithMesh.material,
-      lengthMm: selectedWithMesh.lengthMm,
-      widthMm: selectedWithMesh.widthMm,
-      heightMm: selectedWithMesh.heightMm,
-      depthMm: selectedWithMesh.depthMm,
-      wallThicknessMm: selectedWithMesh.wallThicknessMm,
-      skeletonized: false,
-      skeletonizationPolicy: "sealed-required",
-      openAreaPercent: 0,
-      latticeCellCount: 0,
-      loadPathContinuityScore: 100,
-      renderMesh: selectedWithMesh.renderMesh,
-      derived,
-      candidates: { evaluated: 1, accepted: 1, rejected: 0, bestCandidateId: selectedWithMesh.id },
-      notes: [
-        "Bell nozzles are treated as sealed pressure-boundary/aerodynamic components.",
-        "Skeletonization is intentionally disabled for this component family.",
-        "The selected nozzle includes renderable geometry data for concept, mesh, and simulation views."
-      ]
-    },
-    validations: [
-      {
-        severity: "success",
-        title: "Sealed Geometry Required",
-        text: "Nozzle generation preserved a sealed pressure boundary instead of applying skeletonized lightening holes."
-      },
-      {
-        severity: "success",
-        title: "Renderable Geometry Generated",
-        text: `The nozzle candidate includes ${selectedWithMesh.renderMesh?.vertices.length ?? 0} vertices and ${selectedWithMesh.renderMesh?.faces.length ?? 0} faces.`
-      }
-    ],
-    derived,
-    candidatesEvaluated: 1,
-    candidatesAccepted: 1,
-    candidatesRejected: 0,
-    selectedCandidate: selectedWithMesh,
-    rejectedCandidates: []
-  };
-}
-
-function createNozzleCandidate(requirements: BellNozzleRequirements): CandidateGeometry {
-  const chamberPressureBar = requirements.performance.chamberPressureBar ?? 20;
-  const expansionRatio = 18;
-  const throatDiameterMm = Math.sqrt(requirements.performance.targetThrustN / chamberPressureBar) * 1.6;
-  const exitDiameterMm = Math.min(requirements.envelope.maxExitDiameterMm, throatDiameterMm * Math.sqrt(expansionRatio));
-  const lengthMm = Math.min(requirements.envelope.maxLengthMm, exitDiameterMm * 0.82);
-  const wallThicknessMm = Math.max(requirements.manufacturing.minWallThicknessMm, 2.4);
-  const volumeMm3 =
-    Math.PI *
-    ((exitDiameterMm / 2) ** 2 - Math.max(exitDiameterMm / 2 - wallThicknessMm, 1) ** 2) *
-    lengthMm *
-    0.42;
-
-  return {
-    id: "sealed_bell_nozzle_candidate_001",
-    family: "bell-nozzle",
-    material: requirements.thermal.coolingMode === "regenerative" ? "GRCop-42" : "Inconel 718",
-    widthMm: roundTo(exitDiameterMm, 0.1),
-    heightMm: roundTo(exitDiameterMm, 0.1),
-    depthMm: roundTo(exitDiameterMm, 0.1),
-    lengthMm: roundTo(lengthMm, 0.1),
-    wallThicknessMm,
-    estimatedMassKg: roundTo((volumeMm3 / 1_000_000) * 8.3, 0.001),
-    estimatedStressMpa: roundTo(chamberPressureBar * 2.1 * requirements.safetyFactor, 0.01),
-    estimatedDisplacementMm: roundTo(lengthMm * 0.0008, 0.0001),
-    safetyFactorEstimate: 1.35,
-    manufacturabilityScore: 82,
-    supportBurdenScore: 74,
-    performanceScore: 84,
-    totalScore: 82,
-    rejected: false,
-    rejectionReasons: [],
-    skeletonized: false,
-    skeletonizationPolicy: "sealed-required",
-    openAreaPercent: 0,
-    latticeCellCount: 0,
-    loadPathContinuityScore: 100,
+    renderMesh: undefined,
     derivedParameters: {
-      throatDiameterMm: roundTo(throatDiameterMm, 0.1),
-      exitDiameterMm: roundTo(exitDiameterMm, 0.1),
-      expansionRatio,
-      chamberPressureBar,
-      coolingMode: requirements.thermal.coolingMode,
-      oxidizer: requirements.propellant.oxidizer,
-      fuel: requirements.propellant.fuel,
-      sealedPressureBoundary: true
+      geometrySource: "none",
+      fakeGeometryDisabled: true
     }
   };
 }
 
-function buildNozzleRenderMesh(candidate: CandidateGeometry, requirements: BellNozzleRequirements): RenderableMesh {
-  const mesh = createMeshBuilder();
-  const length = candidate.lengthMm;
-  const exitDiameter = candidate.widthMm;
-  const throatDiameter = numberParam(candidate, "throatDiameterMm", exitDiameter * 0.28);
-  const chamberDiameter = Math.max(throatDiameter * 2.4, exitDiameter * 0.42);
-  const stations = [
-    { z: -length * 0.5, radius: chamberDiameter / 2 },
-    { z: -length * 0.31, radius: chamberDiameter / 2 },
-    { z: -length * 0.13, radius: throatDiameter / 2 },
-    { z: length * 0.12, radius: exitDiameter * 0.31 },
-    { z: length * 0.34, radius: exitDiameter * 0.43 },
-    { z: length * 0.5, radius: exitDiameter / 2 }
-  ];
-  const segments = 36;
+function buildDerivedGeometry(candidate: CandidateGeometry, renderMesh: RenderableMesh | undefined): DerivedGeometry {
+  return {
+    widthMm: candidate.widthMm,
+    heightMm: candidate.heightMm,
+    depthMm: candidate.depthMm,
+    lengthMm: candidate.lengthMm,
+    wallThicknessMm: candidate.wallThicknessMm,
+    material: candidate.material,
+    estimatedMassKg: candidate.estimatedMassKg,
+    selectedCandidateId: candidate.id,
+    skeletonized: candidate.skeletonized,
+    skeletonizationPolicy: candidate.skeletonizationPolicy,
+    openAreaPercent: candidate.openAreaPercent,
+    latticeCellCount: candidate.latticeCellCount,
+    loadPathContinuityScore: candidate.loadPathContinuityScore,
+    renderMesh,
+    derivedParameters: candidate.derivedParameters
+  };
+}
 
-  for (const station of stations) {
-    for (let index = 0; index < segments; index += 1) {
-      const angle = (Math.PI * 2 * index) / segments;
-      mesh.vertices.push([Math.cos(angle) * station.radius, Math.sin(angle) * station.radius, station.z]);
-    }
+function buildBaselineComparison(
+  selectedId: string | undefined,
+  evaluated: number,
+  rejected: number,
+  accepted: number
+): BaselineComparison {
+  return {
+    baselineCandidatesGenerated: evaluated,
+    baselineCandidatesSimulated: 0,
+    baselineCandidatesRejectedAfterReview: rejected,
+    filteredCandidatesGenerated: evaluated,
+    filteredCandidatesRejectedBeforeSimulation: rejected,
+    filteredCandidatesSimulated: accepted,
+    avoidedSimulationRuns: rejected,
+    reductionInSimulationLoadPercent: evaluated > 0 ? roundTo((rejected / evaluated) * 100, 0.1) : 0,
+    selectedFilteredCandidateId: selectedId,
+    selectedBaselineCandidateWasRejected: rejected > 0
+  };
+}
+
+function validatePreSolverConstraints(
+  requirements: StructuralBracketRequirements,
+  candidate: CandidateGeometry
+): string[] {
+  const issues: string[] = [];
+
+  if (requirements.mounting.boltCount < 2) {
+    issues.push("Bolt count must be at least 2 for the structural bracket topology demo.");
   }
 
-  for (let stationIndex = 0; stationIndex < stations.length - 1; stationIndex += 1) {
-    for (let segmentIndex = 0; segmentIndex < segments; segmentIndex += 1) {
-      const next = (segmentIndex + 1) % segments;
-      addFace(
-        mesh,
-        [stationIndex * segments + segmentIndex, stationIndex * segments + next, (stationIndex + 1) * segments + next, (stationIndex + 1) * segments + segmentIndex],
-        "nozzle-shell",
-        0.66 + (stationIndex / stations.length) * 0.22
-      );
-    }
+  if (requirements.mounting.boltDiameterMm <= 0) {
+    issues.push("Bolt diameter must be greater than zero.");
   }
+
+  if (requirements.mounting.spacingMm < requirements.mounting.boltDiameterMm * 2.5) {
+    issues.push("Bolt spacing is too small for valid mounting interfaces.");
+  }
+
+  if (requirements.manufacturing.minWallThicknessMm < 0.8) {
+    issues.push("Minimum wall thickness is below the configured manufacturability floor.");
+  }
+
+  if (candidate.widthMm > requirements.envelope.maxWidthMm + 0.01) {
+    issues.push("Candidate width exceeds envelope.");
+  }
+
+  if (candidate.heightMm > requirements.envelope.maxHeightMm + 0.01) {
+    issues.push("Candidate height exceeds envelope.");
+  }
+
+  if (candidate.depthMm > requirements.envelope.maxDepthMm + 0.01) {
+    issues.push("Candidate depth exceeds envelope.");
+  }
+
+  return issues;
+}
+
+function normalizeStructuralRequirements(requirements: StructuralBracketRequirements): StructuralBracketRequirements {
+  const boltDiameterMm = clamp(finiteOr(requirements.mounting.boltDiameterMm, 6), 2, 40);
+  const boltCount = Math.round(clamp(finiteOr(requirements.mounting.boltCount, 4), 1, 12));
+  const spacingMm = Math.max(finiteOr(requirements.mounting.spacingMm, 48), boltDiameterMm * 2.8);
+  const maxWidthMm = Math.max(finiteOr(requirements.envelope.maxWidthMm, 120), spacingMm + boltDiameterMm * 4.2);
+  const maxHeightMm = Math.max(finiteOr(requirements.envelope.maxHeightMm, 90), boltDiameterMm * 7);
+  const maxDepthMm = Math.max(finiteOr(requirements.envelope.maxDepthMm, 42), boltDiameterMm * 3);
+  const minWallThicknessMm = clamp(finiteOr(requirements.manufacturing.minWallThicknessMm, 3), 0.8, maxDepthMm * 0.5);
 
   return {
-    version: "haf-render-mesh-v1",
-    units: "mm",
-    family: "bell-nozzle",
-    vertices: mesh.vertices,
-    faces: mesh.faces,
-    features: [],
-    bounds: { widthMm: exitDiameter, heightMm: exitDiameter, depthMm: length },
-    metadata: {
-      candidateId: candidate.id,
-      source: "generation-engine",
-      boltCount: 0,
-      lighteningHoleCount: 0,
-      ribCount: 0,
-      gussetCount: 0,
-      diagonalWebCount: 0,
-      skeletonized: false
+    ...requirements,
+    loadCase: {
+      ...requirements.loadCase,
+      forceN: Math.max(finiteOr(requirements.loadCase.forceN, 1000), 1),
+      vibrationHz:
+        requirements.loadCase.vibrationHz === undefined
+          ? undefined
+          : Math.max(finiteOr(requirements.loadCase.vibrationHz, 0), 0)
+    },
+    safetyFactor: clamp(finiteOr(requirements.safetyFactor, 1.5), 1, 6),
+    mounting: {
+      ...requirements.mounting,
+      boltCount,
+      boltDiameterMm,
+      spacingMm
+    },
+    envelope: {
+      ...requirements.envelope,
+      maxWidthMm,
+      maxHeightMm,
+      maxDepthMm
+    },
+    manufacturing: {
+      ...requirements.manufacturing,
+      minWallThicknessMm,
+      maxOverhangDeg: clamp(finiteOr(requirements.manufacturing.maxOverhangDeg, 45), 15, 90)
+    },
+    objectives: {
+      ...requirements.objectives,
+      targetMassKg:
+        requirements.objectives.targetMassKg === undefined
+          ? undefined
+          : Math.max(finiteOr(requirements.objectives.targetMassKg, 0.1), 0.001),
+      targetOpenAreaPercent:
+        requirements.objectives.targetOpenAreaPercent === undefined
+          ? undefined
+          : clamp(finiteOr(requirements.objectives.targetOpenAreaPercent, 55), 10, 82)
     }
   };
 }
 
-function selectStructuralMaterialOptions(requirements: StructuralBracketRequirements): StructuralMaterial[] {
-  const materials: StructuralMaterial[] = [
-    { name: "AlSi10Mg", densityGcc: 2.68, allowableStressMpa: 165, elasticModulusMpa: 70_000 },
-    { name: "Ti-6Al-4V", densityGcc: 4.43, allowableStressMpa: 780, elasticModulusMpa: 114_000 },
-    { name: "Inconel 718", densityGcc: 8.19, allowableStressMpa: 1030, elasticModulusMpa: 200_000 }
-  ];
-
-  if (requirements.objectives.priority === "lightweight") return [materials[0], materials[1], materials[2]];
-  if (requirements.objectives.priority === "stiffness") return [materials[1], materials[2], materials[0]];
-  return materials;
+function normalizeBellNozzleRequirements(requirements: BellNozzleRequirements): BellNozzleRequirements {
+  return {
+    ...requirements,
+    envelope: {
+      ...requirements.envelope,
+      maxLengthMm: Math.max(finiteOr(requirements.envelope.maxLengthMm, 180), 10),
+      maxExitDiameterMm: Math.max(finiteOr(requirements.envelope.maxExitDiameterMm, 80), 10)
+    },
+    manufacturing: {
+      ...requirements.manufacturing,
+      minWallThicknessMm: Math.max(finiteOr(requirements.manufacturing.minWallThicknessMm, 2), 0.5)
+    }
+  };
 }
 
-function createMeshBuilder(): MeshBuilder {
-  return { vertices: [], faces: [], features: [] };
+function getSolverUrl() {
+  const processEnv = typeof process !== "undefined" ? process.env : undefined;
+  return (
+    processEnv?.HELVARIX_SOLVER_URL?.trim() ||
+    processEnv?.VITE_HELVARIX_SOLVER_URL?.trim() ||
+    DEFAULT_SOLVER_URL
+  );
 }
 
-function addBoxFeature(
-  mesh: MeshBuilder,
-  options: {
-    id: string;
-    group: string;
-    min: Vec3;
-    max: Vec3;
-    shade: number;
-  }
+function selectMaterialName(requirements: StructuralBracketRequirements) {
+  if (requirements.manufacturing.process === "additive") return "AlSi10Mg";
+  return "7075-T6 Aluminum";
+}
+
+function estimateBracketMassKg(
+  widthMm: number,
+  heightMm: number,
+  depthMm: number,
+  wallThicknessMm: number,
+  openAreaPercent: number,
+  material: string
 ) {
-  const start = mesh.vertices.length;
-  const [x0, y0, z0] = options.min;
-  const [x1, y1, z1] = options.max;
-  mesh.vertices.push([x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]);
-  addFace(mesh, [start + 0, start + 1, start + 2, start + 3], options.group, options.shade * 0.88);
-  addFace(mesh, [start + 4, start + 7, start + 6, start + 5], options.group, options.shade * 1.12);
-  addFace(mesh, [start + 0, start + 4, start + 5, start + 1], options.group, options.shade * 1.02);
-  addFace(mesh, [start + 1, start + 5, start + 6, start + 2], options.group, options.shade * 1.08);
-  addFace(mesh, [start + 2, start + 6, start + 7, start + 3], options.group, options.shade);
-  addFace(mesh, [start + 3, start + 7, start + 4, start + 0], options.group, options.shade * 0.84);
-  mesh.features.push({
-    type: options.group,
-    id: options.id,
-    center: [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2],
-    size: [Math.abs(x1 - x0), Math.abs(y1 - y0), Math.abs(z1 - z0)]
-  } as RenderableMeshFeature);
+  const densityGcc = material.includes("Al") ? 2.68 : 2.8;
+  const solidFraction = clamp(1 - openAreaPercent / 100, 0.18, 0.9);
+  const volumeMm3 = widthMm * heightMm * depthMm * solidFraction * clamp(wallThicknessMm / Math.max(depthMm, 1), 0.08, 0.65);
+  return roundTo((volumeMm3 / 1_000_000) * densityGcc, 0.001);
 }
 
-function addQuad(mesh: MeshBuilder, vertices: Vec3[], group: string, shade: number) {
-  const start = mesh.vertices.length;
-  mesh.vertices.push(vertices[0], vertices[1], vertices[2], vertices[3]);
-  addFace(mesh, [start, start + 1, start + 2, start + 3], group, shade);
+function estimateStressMpa(requirements: StructuralBracketRequirements, widthMm: number, wallThicknessMm: number) {
+  const sectionAreaMm2 = Math.max(widthMm * wallThicknessMm * 0.32, 1);
+  const requiredLoadN = requirements.loadCase.forceN * requirements.safetyFactor;
+  return roundTo(requiredLoadN / sectionAreaMm2, 0.01);
 }
 
-function addFace(mesh: MeshBuilder, indices: number[], group: string, shade: number) {
-  mesh.faces.push({ indices, group, shade: clamp(shade, 0.1, 1.4) } as RenderableMesh["faces"][number]);
+function estimateSafetyFactor(material: string, stressMpa: number) {
+  const allowableStressMpa = material.includes("AlSi10Mg") ? 210 : 300;
+  return roundTo(allowableStressMpa / Math.max(stressMpa, 0.1), 0.01);
 }
 
-function numberParam(candidate: CandidateGeometry, key: string, fallback: number) {
-  const value = candidate.derivedParameters[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+function readMetric(metrics: Record<string, unknown>, keys: string[], fallback: number) {
+  for (const key of keys) {
+    const value = metrics[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+
+  return fallback;
 }
 
-function widthFactorForMode(mode: StructuralMode) {
-  if (mode === "minimum-mass-density") return 0.54;
-  if (mode === "stiffness-density") return 0.64;
-  if (mode === "vibration-density") return 0.62;
-  return 0.58;
+function isStructuralRequirements(
+  requirements: StructuralBracketRequirements | BellNozzleRequirements
+): requirements is StructuralBracketRequirements {
+  return "mounting" in requirements && "loadCase" in requirements;
 }
 
-function heightFactorForMode(mode: StructuralMode) {
-  if (mode === "minimum-mass-density") return 0.42;
-  if (mode === "stiffness-density") return 0.52;
-  if (mode === "vibration-density") return 0.5;
-  return 0.46;
-}
-
-function topologyEfficiencyForMode(mode: StructuralMode, requirements: StructuralBracketRequirements) {
-  const vibration = requirements.loadCase.vibrationHz ?? 0;
-  if (mode === "minimum-mass-density") return vibration > 100 ? 1.08 : 1.16;
-  if (mode === "stiffness-density") return 1.28;
-  if (mode === "vibration-density") return 1.22 + Math.min(vibration / 1000, 0.18);
-  return 1.2;
-}
-
-function densityModeFitScore(mode: StructuralMode, requirements: StructuralBracketRequirements) {
-  if (requirements.objectives.priority === "lightweight" && mode === "minimum-mass-density") return 96;
-  if (requirements.objectives.priority === "stiffness" && mode === "stiffness-density") return 96;
-  if ((requirements.loadCase.vibrationHz ?? 0) > 80 && mode === "vibration-density") return 94;
-  if (mode === "balanced-density") return 88;
-  return 82;
-}
-
-function estimateComputeBurn(evaluated: number, accepted: number) {
-  return Math.max(1, Math.ceil(evaluated / 18) + Math.max(0, 2 - accepted));
-}
-
-function weightedAverage(items: Array<[number, number]>) {
-  const totalWeight = items.reduce((sum, [, weight]) => sum + weight, 0);
-  if (totalWeight <= 0) return 0;
-  return items.reduce((sum, [value, weight]) => sum + value * weight, 0) / totalWeight;
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, value));
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function finiteOr(value: number | undefined, fallback: number) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function roundTo(value: number, step: number) {
-  return Math.round(value / step) * step;
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
 }
 
-function distance2d(x0: number, y0: number, x1: number, y1: number) {
-  return Math.hypot(x0 - x1, y0 - y1);
+function roundTo(value: number, step: number) {
+  if (!Number.isFinite(value) || step <= 0) return value;
+  return Math.round(value / step) * step;
 }
