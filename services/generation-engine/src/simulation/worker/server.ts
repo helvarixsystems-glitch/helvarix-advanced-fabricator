@@ -357,8 +357,92 @@ function buildMeshFromDensity(args: {
   threshold: number;
   rawMetadata: unknown;
 }): RenderMesh | undefined {
-  const density = coerceDensity(args.density);
-  if (!density) return undefined;
+  const rawDensity = coerceDensity(args.density);
+  if (!rawDensity) return undefined;
+
+  const preparedDensity = prepareManufacturableDensity(rawDensity, {
+    threshold: 0.24,
+    dilationPasses: 2,
+    smoothingPasses: 3,
+    closingPasses: 1,
+  });
+
+  const mesh = buildSurfaceNetMesh({
+    density: preparedDensity,
+    family: args.family,
+    candidateId: args.candidateId,
+    boltCount: args.boltCount,
+    widthMm: args.widthMm,
+    heightMm: args.heightMm,
+    depthMm: args.depthMm,
+    threshold: 0.46,
+    rawMetadata: args.rawMetadata,
+  });
+
+  if (!mesh) return undefined;
+
+  mesh.metadata = {
+    ...mesh.metadata,
+    source: "fenics-density-manufacturable-surface-nets",
+    extractionMethod: "smoothed-surface-nets",
+    postProcessing: {
+      inputThreshold: 0.24,
+      meshThreshold: 0.46,
+      dilationPasses: 2,
+      smoothingPasses: 3,
+      closingPasses: 1,
+      fakeGeometryDisabled: true,
+    },
+  };
+
+  return mesh;
+}
+
+function prepareManufacturableDensity(
+  density: number[][][],
+  options: {
+    threshold: number;
+    dilationPasses: number;
+    smoothingPasses: number;
+    closingPasses: number;
+  }
+): number[][][] {
+  let field = cloneDensity(density);
+
+  field = normalizeDensity(field);
+  field = thresholdSoft(field, options.threshold);
+
+  for (let i = 0; i < options.closingPasses; i += 1) {
+    field = dilateDensity(field, 1);
+    field = erodeDensity(field, 1);
+  }
+
+  for (let i = 0; i < options.dilationPasses; i += 1) {
+    field = dilateDensity(field, 1);
+  }
+
+  for (let i = 0; i < options.smoothingPasses; i += 1) {
+    field = smoothDensity(field);
+    field = preserveStrongInterfaces(field, density, options.threshold);
+  }
+
+  field = normalizeDensity(field);
+
+  return field;
+}
+
+function buildSurfaceNetMesh(args: {
+  density: number[][][];
+  family: string;
+  candidateId: string;
+  boltCount: number;
+  widthMm: number;
+  heightMm: number;
+  depthMm: number;
+  threshold: number;
+  rawMetadata: unknown;
+}): RenderMesh | undefined {
+  const density = args.density;
 
   const nx = density.length;
   const ny = density[0]?.length ?? 0;
@@ -414,9 +498,6 @@ function buildMeshFromDensity(args: {
     [3, 7],
   ];
 
-  // Surface nets: one relaxed vertex per threshold-crossing grid cell.
-  // This avoids the blocky "one cube per solid voxel" look while still using
-  // the solver density field as the only geometry source.
   for (let ix = 0; ix < nx - 1; ix += 1) {
     for (let iy = 0; iy < ny - 1; iy += 1) {
       for (let iz = 0; iz < nz - 1; iz += 1) {
@@ -493,8 +574,6 @@ function buildMeshFromDensity(args: {
     });
   };
 
-  // Connect the surface-net vertices around every crossing grid edge.
-  // Each crossing edge produces one quad from its four neighboring cells.
   for (let ix = 0; ix < nx - 1; ix += 1) {
     for (let iy = 1; iy < ny - 1; iy += 1) {
       for (let iz = 1; iz < nz - 1; iz += 1) {
@@ -563,11 +642,13 @@ function buildMeshFromDensity(args: {
 
   if (vertices.length < 4 || faces.length < 1) return undefined;
 
+  const relaxedVertices = laplacianRelaxVertices(vertices, faces, 4, 0.34);
+
   return {
     version: "haf-render-mesh-v1",
     units: "mm",
     family: args.family,
-    vertices,
+    vertices: relaxedVertices,
     faces,
     features: [],
     bounds: {
@@ -582,10 +663,254 @@ function buildMeshFromDensity(args: {
       threshold: args.threshold,
       densityGrid: { nx, ny, nz },
       boltCount: args.boltCount,
-      extractionMethod: "surface-nets",
+      extractionMethod: "surface-nets-laplacian-relaxed",
       solverMetadata: args.rawMetadata ?? {},
     },
   };
+}
+
+function cloneDensity(density: number[][][]): number[][][] {
+  return density.map((plane) => plane.map((row) => [...row]));
+}
+
+function normalizeDensity(density: number[][][]): number[][][] {
+  let max = 0;
+
+  forEachDensityCell(density, (_x, _y, _z, value) => {
+    if (value > max) max = value;
+  });
+
+  if (max <= 1e-9) return cloneDensity(density);
+
+  return density.map((plane) =>
+    plane.map((row) => row.map((value) => Math.max(0, Math.min(1, value / max))))
+  );
+}
+
+function thresholdSoft(density: number[][][], threshold: number): number[][][] {
+  return density.map((plane) =>
+    plane.map((row) =>
+      row.map((value) => {
+        if (value <= threshold * 0.45) return 0;
+        if (value >= threshold) return 1;
+        const t = (value - threshold * 0.45) / (threshold * 0.55);
+        return smoothstep(t);
+      })
+    )
+  );
+}
+
+function dilateDensity(density: number[][][], radius: number): number[][][] {
+  const nx = density.length;
+  const ny = density[0]?.length ?? 0;
+  const nz = density[0]?.[0]?.length ?? 0;
+  const out = cloneDensity(density);
+
+  for (let ix = 0; ix < nx; ix += 1) {
+    for (let iy = 0; iy < ny; iy += 1) {
+      for (let iz = 0; iz < nz; iz += 1) {
+        let best = density[ix][iy][iz];
+
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          for (let dy = -radius; dy <= radius; dy += 1) {
+            for (let dz = -radius; dz <= radius; dz += 1) {
+              const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+              if (distance > radius + 0.001) continue;
+
+              const sx = ix + dx;
+              const sy = iy + dy;
+              const sz = iz + dz;
+
+              if (sx < 0 || sy < 0 || sz < 0 || sx >= nx || sy >= ny || sz >= nz) {
+                continue;
+              }
+
+              const falloff = 1 - distance / (radius + 1);
+              best = Math.max(best, density[sx][sy][sz] * (0.72 + falloff * 0.28));
+            }
+          }
+        }
+
+        out[ix][iy][iz] = best;
+      }
+    }
+  }
+
+  return out;
+}
+
+function erodeDensity(density: number[][][], radius: number): number[][][] {
+  const nx = density.length;
+  const ny = density[0]?.length ?? 0;
+  const nz = density[0]?.[0]?.length ?? 0;
+  const out = cloneDensity(density);
+
+  for (let ix = 0; ix < nx; ix += 1) {
+    for (let iy = 0; iy < ny; iy += 1) {
+      for (let iz = 0; iz < nz; iz += 1) {
+        let worst = density[ix][iy][iz];
+
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          for (let dy = -radius; dy <= radius; dy += 1) {
+            for (let dz = -radius; dz <= radius; dz += 1) {
+              const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+              if (distance > radius + 0.001) continue;
+
+              const sx = ix + dx;
+              const sy = iy + dy;
+              const sz = iz + dz;
+
+              if (sx < 0 || sy < 0 || sz < 0 || sx >= nx || sy >= ny || sz >= nz) {
+                worst = 0;
+                continue;
+              }
+
+              worst = Math.min(worst, density[sx][sy][sz]);
+            }
+          }
+        }
+
+        out[ix][iy][iz] = worst;
+      }
+    }
+  }
+
+  return out;
+}
+
+function smoothDensity(density: number[][][]): number[][][] {
+  const nx = density.length;
+  const ny = density[0]?.length ?? 0;
+  const nz = density[0]?.[0]?.length ?? 0;
+  const out = cloneDensity(density);
+
+  for (let ix = 0; ix < nx; ix += 1) {
+    for (let iy = 0; iy < ny; iy += 1) {
+      for (let iz = 0; iz < nz; iz += 1) {
+        let total = 0;
+        let weight = 0;
+
+        for (let dx = -1; dx <= 1; dx += 1) {
+          for (let dy = -1; dy <= 1; dy += 1) {
+            for (let dz = -1; dz <= 1; dz += 1) {
+              const sx = ix + dx;
+              const sy = iy + dy;
+              const sz = iz + dz;
+
+              if (sx < 0 || sy < 0 || sz < 0 || sx >= nx || sy >= ny || sz >= nz) {
+                continue;
+              }
+
+              const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+              const w = distance === 0 ? 3.2 : 1 / (1 + distance);
+
+              total += density[sx][sy][sz] * w;
+              weight += w;
+            }
+          }
+        }
+
+        out[ix][iy][iz] = weight > 0 ? total / weight : density[ix][iy][iz];
+      }
+    }
+  }
+
+  return out;
+}
+
+function preserveStrongInterfaces(
+  field: number[][][],
+  original: number[][][],
+  threshold: number
+): number[][][] {
+  const out = cloneDensity(field);
+
+  forEachDensityCell(original, (ix, iy, iz, value) => {
+    if (value >= Math.max(0.72, threshold * 1.8)) {
+      out[ix][iy][iz] = Math.max(out[ix][iy][iz], 0.96);
+    }
+
+    if (value <= threshold * 0.12) {
+      out[ix][iy][iz] = Math.min(out[ix][iy][iz], 0.08);
+    }
+  });
+
+  return out;
+}
+
+function laplacianRelaxVertices(
+  vertices: Vec3[],
+  faces: RenderFace[],
+  iterations: number,
+  lambda: number
+): Vec3[] {
+  const neighbors = new Map<number, Set<number>>();
+
+  for (const face of faces) {
+    for (let i = 0; i < face.indices.length; i += 1) {
+      const a = face.indices[i];
+      const b = face.indices[(i + 1) % face.indices.length];
+
+      if (!neighbors.has(a)) neighbors.set(a, new Set());
+      if (!neighbors.has(b)) neighbors.set(b, new Set());
+
+      neighbors.get(a)!.add(b);
+      neighbors.get(b)!.add(a);
+    }
+  }
+
+  let current = vertices.map((v) => [...v] as Vec3);
+
+  for (let iter = 0; iter < iterations; iter += 1) {
+    const next = current.map((v) => [...v] as Vec3);
+
+    for (let i = 0; i < current.length; i += 1) {
+      const ns = neighbors.get(i);
+      if (!ns || ns.size < 3) continue;
+
+      let cx = 0;
+      let cy = 0;
+      let cz = 0;
+
+      for (const n of ns) {
+        cx += current[n][0];
+        cy += current[n][1];
+        cz += current[n][2];
+      }
+
+      cx /= ns.size;
+      cy /= ns.size;
+      cz /= ns.size;
+
+      next[i] = [
+        roundTo(current[i][0] * (1 - lambda) + cx * lambda, 0.0001),
+        roundTo(current[i][1] * (1 - lambda) + cy * lambda, 0.0001),
+        roundTo(current[i][2] * (1 - lambda) + cz * lambda, 0.0001),
+      ];
+    }
+
+    current = next;
+  }
+
+  return current;
+}
+
+function forEachDensityCell(
+  density: number[][][],
+  fn: (ix: number, iy: number, iz: number, value: number) => void
+) {
+  for (let ix = 0; ix < density.length; ix += 1) {
+    for (let iy = 0; iy < density[ix].length; iy += 1) {
+      for (let iz = 0; iz < density[ix][iy].length; iz += 1) {
+        fn(ix, iy, iz, density[ix][iy][iz]);
+      }
+    }
+  }
+}
+
+function smoothstep(t: number): number {
+  const x = Math.max(0, Math.min(1, t));
+  return x * x * (3 - 2 * x);
 }
 
 function coerceDensity(value: unknown): number[][][] | undefined {
