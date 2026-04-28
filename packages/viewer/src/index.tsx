@@ -57,8 +57,9 @@ export function GraphPaperRoom({
   status?: string;
 }) {
   const safeGeometry = geometry as SafeGeometry | undefined;
-  const family = normalizeFamily(safeGeometry);
-  const hasGeneratedGeometry = Boolean(family);
+  const renderableMesh = getRenderableMesh(safeGeometry);
+  const family = renderableMesh ? normalizeFamily(safeGeometry) : undefined;
+  const hasGeneratedGeometry = Boolean(renderableMesh && family);
   const simulationLabel = family ? getSimulationLabel(family) : "SIMULATION VIEW";
 
   return (
@@ -92,16 +93,25 @@ export function GraphPaperRoom({
         </div>
 
         <div style={styles.overlayBottom}>
-          {safeGeometry ? formatGeometryLabel(safeGeometry) : "GENERATE CONCEPT · NO GEOMETRY LOADED"}
+          {hasGeneratedGeometry && safeGeometry
+            ? formatGeometryLabel(safeGeometry)
+            : "NO GEOMETRY PRODUCED · SOLVER MESH REQUIRED"}
         </div>
 
-        {safeGeometry ? <AxisMeasurements geometry={safeGeometry} /> : null}
+        {!hasGeneratedGeometry ? (
+          <div style={styles.noGeometryPanel}>
+            <strong>NO GEOMETRY PRODUCED</strong>
+            <span>The viewer is locked until the generation engine returns a real renderMesh.</span>
+          </div>
+        ) : null}
 
-        {mode === "simulation" ? (
+        {hasGeneratedGeometry && safeGeometry ? <AxisMeasurements geometry={safeGeometry} /> : null}
+
+        {mode === "simulation" && hasGeneratedGeometry && safeGeometry && family ? (
           <SimulationHud geometry={safeGeometry} family={family} status={status} />
         ) : null}
 
-        {mode === "mesh" ? <MeshHud geometry={safeGeometry} /> : null}
+        {mode === "mesh" && hasGeneratedGeometry ? <MeshHud geometry={safeGeometry} /> : null}
 
         {safeGeometry?.notes?.length ? (
           <div style={styles.notesPanel}>
@@ -742,14 +752,13 @@ function buildMeshForFamily(geometry: SafeGeometry, family: VisualFamily): MeshM
     return renderMesh;
   }
 
-  if (family === "bell-nozzle") return buildBellNozzleMesh(geometry);
-  if (family === "pressure-vessel") return buildPressureVesselMesh(geometry);
-  if (family === "rover-arm") return buildRoverArmMesh(geometry);
-  if (family === "grid-fin") return buildGridFinMesh(geometry);
-  if (family === "nosecone") return buildNoseconeMesh(geometry);
-  if (family === "shell") return buildShellMesh(geometry);
-
-  return buildStructuralBracketMesh(geometry);
+  // Production rule: do not synthesize decorative fallback geometry in the viewer.
+  // If the solver/generation engine did not produce a real renderMesh, the viewer
+  // must show an explicit no-geometry state instead of inventing a part.
+  return {
+    vertices: [],
+    faces: []
+  };
 }
 
 function getRenderableMesh(geometry?: SafeGeometry): MeshModel | undefined {
@@ -1695,6 +1704,26 @@ const styles: Record<string, CSSProperties | ((status?: string) => CSSProperties
     letterSpacing: "0.08em",
     textTransform: "uppercase",
     textAlign: "right"
+  },
+  noGeometryPanel: {
+    position: "absolute",
+    left: "50%",
+    top: "50%",
+    transform: "translate(-50%, -50%)",
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    maxWidth: 360,
+    padding: "18px 20px",
+    border: "1px solid rgba(20, 20, 20, 0.18)",
+    borderRadius: 18,
+    background: "rgba(255, 255, 255, 0.82)",
+    boxShadow: "0 18px 50px rgba(15, 23, 42, 0.14)",
+    color: "#171717",
+    textAlign: "center",
+    fontSize: 12,
+    letterSpacing: "0.08em",
+    textTransform: "uppercase"
   },
   notesPanel: {
   position: "absolute",
