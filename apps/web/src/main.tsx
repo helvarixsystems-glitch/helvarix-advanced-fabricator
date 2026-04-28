@@ -1490,7 +1490,7 @@ function buildViewerGeometry(generation: GenerationSummary | null) {
    notes: [
   renderMesh
     ? `ENGINE MESH ACTIVE: ${renderMesh.vertices.length} vertices, ${renderMesh.faces.length} faces.`
-    : "WARNING: No renderMesh reached the viewer. Viewer is using fallback geometry.",
+    : "NO GEOMETRY PRODUCED: solver/generation engine did not return a renderMesh.",
   ...(result.geometry?.notes ?? [])
 ]
   };
