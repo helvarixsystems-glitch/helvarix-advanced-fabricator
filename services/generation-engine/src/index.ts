@@ -27,7 +27,10 @@ export async function generateComponent(input: GenerationInput): Promise<Generat
     return generateBellNozzle(input.requirements);
   }
 
-  return generateStructuralPart(input.componentFamily, input.requirements);
+  return generateStructuralPart(
+    input.componentFamily,
+    normalizeStructuralRequirements(input.requirements)
+  );
 }
 
 export const runGeneration = generateComponent;
@@ -77,6 +80,55 @@ type MeshBuilder = {
   faces: RenderableMesh["faces"];
   features: RenderableMeshFeature[];
 };
+
+function normalizeStructuralRequirements(requirements: StructuralBracketRequirements): StructuralBracketRequirements {
+  const safeBoltDiameter = clamp(finiteOr(requirements.mounting.boltDiameterMm, 6), 2, 40);
+  const safeBoltCount = Math.round(clamp(finiteOr(requirements.mounting.boltCount, 4), 1, 12));
+  const minimumSpacing = safeBoltDiameter * 2.6;
+  const safeSpacing = Math.max(finiteOr(requirements.mounting.spacingMm, minimumSpacing), minimumSpacing);
+  const safeEnvelopeWidth = Math.max(finiteOr(requirements.envelope.maxWidthMm, 140), safeSpacing + safeBoltDiameter * 4.2);
+  const safeEnvelopeHeight = Math.max(finiteOr(requirements.envelope.maxHeightMm, 120), safeBoltDiameter * 8);
+  const safeEnvelopeDepth = Math.max(finiteOr(requirements.envelope.maxDepthMm, 36), safeBoltDiameter * 3.25);
+  const safeWall = clamp(finiteOr(requirements.manufacturing.minWallThicknessMm, 2.4), 0.8, safeEnvelopeDepth * 0.42);
+
+  return {
+    ...requirements,
+    loadCase: {
+      ...requirements.loadCase,
+      forceN: Math.max(finiteOr(requirements.loadCase.forceN, 1000), 1),
+      vibrationHz: requirements.loadCase.vibrationHz === undefined
+        ? undefined
+        : Math.max(finiteOr(requirements.loadCase.vibrationHz, 0), 0)
+    },
+    safetyFactor: clamp(finiteOr(requirements.safetyFactor, 1.5), 1, 6),
+    mounting: {
+      ...requirements.mounting,
+      boltCount: safeBoltCount,
+      boltDiameterMm: safeBoltDiameter,
+      spacingMm: safeSpacing
+    },
+    envelope: {
+      ...requirements.envelope,
+      maxWidthMm: safeEnvelopeWidth,
+      maxHeightMm: safeEnvelopeHeight,
+      maxDepthMm: safeEnvelopeDepth
+    },
+    manufacturing: {
+      ...requirements.manufacturing,
+      minWallThicknessMm: safeWall,
+      maxOverhangDeg: clamp(finiteOr(requirements.manufacturing.maxOverhangDeg, 45), 15, 90)
+    },
+    objectives: {
+      ...requirements.objectives,
+      targetMassKg: requirements.objectives.targetMassKg === undefined
+        ? undefined
+        : Math.max(finiteOr(requirements.objectives.targetMassKg, 0.1), 0.001),
+      targetOpenAreaPercent: requirements.objectives.targetOpenAreaPercent === undefined
+        ? requirements.objectives.targetOpenAreaPercent
+        : clamp(finiteOr(requirements.objectives.targetOpenAreaPercent, 50), 10, 82)
+    }
+  };
+}
 
 async function generateStructuralPart(
   family: ComponentFamily,
@@ -153,7 +205,7 @@ async function generateStructuralPart(
   };
 
   return {
-    revision: "REQ-GEN-008-FENICS-ISO-SURFACE-TOPOLOGY",
+    revision: "REQ-GEN-009-CONSTRAINT-FILTERED-PRODUCTION-BRACKET",
     exportState: "idle",
     estimatedMassKg: selected.estimatedMassKg,
     estimatedBurn: estimateComputeBurn(filteredCandidates.length, accepted.length),
@@ -426,7 +478,7 @@ async function buildStructuralRenderMesh(
     candidate.derivedParameters.fenicsStatus = "connected";
   }
   candidate.derivedParameters.fenicsEngine = fenics?.engine ?? String(candidate.derivedParameters.fenicsEngine ?? "unknown");
-  candidate.derivedParameters.fenicsGrid = { nx: stats.nx, ny: stats.ny, nz: stats.nz };
+  candidate.derivedParameters.fenicsGrid = `${stats.nx}x${stats.ny}x${stats.nz}`;
   candidate.derivedParameters.fenicsSolidFraction = roundTo(stats.solidFraction, 0.001);
   candidate.derivedParameters.fenicsAverageDensity = roundTo(stats.averageDensity, 0.001);
   candidate.derivedParameters.fenicsOpenAreaPercent = roundTo(stats.openAreaPercent, 0.1);
@@ -648,10 +700,7 @@ function buildDensitySurfaceMesh(
     bounds: { widthMm: width, heightMm: height, depthMm: depth },
     metadata: {
       candidateId: candidate.id,
-      source: "density-guided-production-bracket",
-      solverEngine: String(candidate.derivedParameters.fenicsEngine ?? "unknown"),
-      solidFraction: roundTo(stats.solidFraction, 0.001),
-      openAreaPercent: roundTo(stats.openAreaPercent, 0.1),
+      source: "generation-engine",
       boltCount,
       lighteningHoleCount: Math.max(3, Math.round(stats.openAreaPercent / 14)),
       ribCount,
@@ -2438,7 +2487,7 @@ function buildDeterministicFallbackMesh(candidate: CandidateGeometry, requiremen
     bounds: { widthMm: width, heightMm: height, depthMm: depth },
     metadata: {
       candidateId: candidate.id,
-      source: "deterministic-fallback",
+      source: "generation-engine",
       boltCount,
       lighteningHoleCount: 0,
       ribCount: 0,
@@ -2450,25 +2499,43 @@ function buildDeterministicFallbackMesh(candidate: CandidateGeometry, requiremen
 }
 
 function buildBoltPositions(width: number, height: number, railHeight: number, boltCount: number): Array<[number, number]> {
-  const safeCount = clamp(Math.round(boltCount), 1, 12);
-  const xRadius = width * 0.32;
-  const yTop = height / 2 - railHeight * 0.52;
-  const yBottom = -height / 2 + railHeight * 0.52;
+  const safeCount = Math.round(clamp(boltCount, 1, 12));
+  const xRadius = width * 0.34;
+  const yTop = height / 2 - railHeight * 0.54;
+  const yBottom = -height / 2 + railHeight * 0.54;
+  const yMid = -height * 0.02;
 
   if (safeCount === 1) return [[0, yBottom]];
   if (safeCount === 2) return [[-xRadius, yBottom], [xRadius, yBottom]];
   if (safeCount === 3) return [[-xRadius, yBottom], [xRadius, yBottom], [0, yTop]];
   if (safeCount === 4) return [[-xRadius, yTop], [xRadius, yTop], [-xRadius, yBottom], [xRadius, yBottom]];
+  if (safeCount === 5) return [[-xRadius, yTop], [xRadius, yTop], [-xRadius, yBottom], [xRadius, yBottom], [0, yMid]];
+  if (safeCount === 6) return [[-xRadius, yTop], [0, yTop], [xRadius, yTop], [-xRadius, yBottom], [0, yBottom], [xRadius, yBottom]];
+  if (safeCount === 8) return [
+    [-xRadius, yTop], [-xRadius * 0.34, yTop], [xRadius * 0.34, yTop], [xRadius, yTop],
+    [-xRadius, yBottom], [-xRadius * 0.34, yBottom], [xRadius * 0.34, yBottom], [xRadius, yBottom]
+  ];
 
   const positions: Array<[number, number]> = [];
-  for (let index = 0; index < safeCount; index += 1) {
-    const angle = -Math.PI / 2 + (Math.PI * 2 * index) / safeCount;
-    positions.push([Math.cos(angle) * xRadius, Math.sin(angle) * height * 0.36]);
+  const rowCount = safeCount <= 7 ? 2 : 3;
+  const perRow = Math.ceil(safeCount / rowCount);
+  let remaining = safeCount;
+
+  for (let row = 0; row < rowCount; row += 1) {
+    const countThisRow = Math.min(perRow, remaining);
+    remaining -= countThisRow;
+    const rowY = rowCount === 2
+      ? (row === 0 ? yTop : yBottom)
+      : yTop - (row * (yTop - yBottom)) / 2;
+
+    for (let index = 0; index < countThisRow; index += 1) {
+      const t = countThisRow === 1 ? 0.5 : index / (countThisRow - 1);
+      positions.push([-xRadius + t * xRadius * 2, rowY]);
+    }
   }
 
-  return positions;
+  return positions.slice(0, safeCount);
 }
-
 function isValidDensityField(value: unknown): value is number[][][] {
   if (!Array.isArray(value) || value.length === 0) return false;
   if (!Array.isArray(value[0]) || value[0].length === 0) return false;
@@ -2866,6 +2933,10 @@ function weightedAverage(items: Array<[number, number]>) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function finiteOr(value: number | undefined, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 function roundTo(value: number, step: number) {
