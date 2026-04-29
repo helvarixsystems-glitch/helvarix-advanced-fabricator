@@ -2,21 +2,25 @@
 """
 Helvarix Advanced Fabricator — topology.py
 
-Authoritative Phase-I topology solver for:
-services/solver-fenics/topology.py
+Path:
+  services/solver-fenics/topology.py
 
-Purpose:
-- Produce a real solver-derived density field for the viewer.
-- Stop relying on decorative TypeScript geometry.
-- Bias the density result toward bracket-like load paths:
-  fixed bolt interfaces -> load interface -> organic struts/ribs.
-- Return NO fake geometry. If the numerical solver fails, return ok:false.
+Action:
+  REPLACE the existing file.
 
-This is a 2D SIMP compliance-minimization solver with a 3D extrusion step.
-That is intentional for the current Phase-I prototype:
-- It is fast enough for Render.
-- It produces meaningful bracket load paths.
-- It returns density[nx][ny][nz] for the existing mesh extractor.
+Phase 2 objective:
+  Strong + manufacturable bracket topology.
+
+This solver intentionally prioritizes:
+  - thicker members
+  - multiple load paths
+  - bolt-boss/load-pad preservation
+  - less fragile one-line topology
+  - smoother density suitable for surface extraction
+
+It does NOT fake geometry.
+It returns only a solver-derived density field.
+If the numerical solve fails, it returns ok:false.
 """
 
 from __future__ import annotations
@@ -35,41 +39,44 @@ try:
     from scipy.sparse.linalg import spsolve
 except Exception as exc:
     raise RuntimeError(
-        "Topology solver requires scipy. Make sure services/solver-fenics/requirements.txt "
-        "includes scipy and redeploy the Render worker."
+        "topology.py requires scipy. Add scipy to services/solver-fenics/requirements.txt "
+        "and redeploy the Render worker."
     ) from exc
 
 
-ENGINE = "haf-simp-bracket-topology-v3"
+ENGINE = "haf-simp-manufacturable-bracket-v4"
 
 
 @dataclass
 class TopologyInput:
-    nx: int = 72
-    ny: int = 48
-    nz: int = 18
+    nx: int = 84
+    ny: int = 54
+    nz: int = 20
     load_direction: str = "vertical"
     bolt_count: int = 2
-    target_open_area_percent: float = 62.0
+    target_open_area_percent: float = 54.0
     safety_factor: float = 1.5
     force_n: float = 2500.0
-    max_iterations: int = 95
-    min_iterations: int = 35
-    change_tolerance: float = 0.010
-    penalization: float = 3.25
-    filter_radius: float = 2.2
+    max_iterations: int = 120
+    min_iterations: int = 50
+    change_tolerance: float = 0.008
+    penalization: float = 3.15
+    filter_radius: float = 3.6
     poisson_ratio: float = 0.33
+    manufacturing_bias: float = 0.42
+    minimum_member_radius: float = 2.8
 
 
 @dataclass
-class MasksAndLoads:
+class ModelDefinition:
     forced_solid: np.ndarray
     forced_void: np.ndarray
+    preferred_structure: np.ndarray
     fixed_dofs: np.ndarray
     force: np.ndarray
     bolt_centers: List[Tuple[float, float]]
+    load_center: Tuple[float, float]
     load_nodes: List[Tuple[int, int]]
-    load_interface_center: Tuple[float, float]
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -77,28 +84,35 @@ def clamp(value: float, low: float, high: float) -> float:
 
 
 def parse_input(raw: Dict[str, Any]) -> TopologyInput:
+    target_open = float(raw.get("targetOpenAreaPercent", 54.0))
+    target_open = clamp(target_open, 38.0, 62.0)
+
     return TopologyInput(
-        nx=int(clamp(int(raw.get("nx", 72)), 24, 120)),
-        ny=int(clamp(int(raw.get("ny", 48)), 24, 96)),
-        nz=int(clamp(int(raw.get("nz", 18)), 6, 48)),
+        nx=int(clamp(int(raw.get("nx", 84)), 32, 132)),
+        ny=int(clamp(int(raw.get("ny", 54)), 28, 100)),
+        nz=int(clamp(int(raw.get("nz", 20)), 8, 50)),
         load_direction=str(raw.get("loadDirection", "vertical")).lower().strip(),
         bolt_count=int(clamp(int(raw.get("boltCount", 2)), 1, 8)),
-        target_open_area_percent=float(
-            clamp(float(raw.get("targetOpenAreaPercent", 62.0)), 25.0, 78.0)
-        ),
+        target_open_area_percent=target_open,
         safety_factor=float(clamp(float(raw.get("safetyFactor", 1.5)), 1.0, 4.0)),
-        force_n=float(clamp(float(raw.get("forceN", 2500.0)), 1.0, 1.0e7)),
-        max_iterations=int(clamp(int(raw.get("maxIterations", 95)), 25, 180)),
-        min_iterations=int(clamp(int(raw.get("minIterations", 35)), 10, 80)),
-        change_tolerance=float(clamp(float(raw.get("changeTolerance", 0.010)), 0.002, 0.05)),
-        penalization=float(clamp(float(raw.get("penalization", 3.25)), 2.0, 4.5)),
-        filter_radius=float(clamp(float(raw.get("filterRadius", 2.2)), 1.4, 7.0)),
+        force_n=float(clamp(float(raw.get("forceN", 2500.0)), 10.0, 1.0e7)),
+        max_iterations=int(clamp(int(raw.get("maxIterations", 120)), 60, 220)),
+        min_iterations=int(clamp(int(raw.get("minIterations", 50)), 25, 120)),
+        change_tolerance=float(clamp(float(raw.get("changeTolerance", 0.008)), 0.002, 0.04)),
+        penalization=float(clamp(float(raw.get("penalization", 3.15)), 2.4, 4.2)),
+        filter_radius=float(clamp(float(raw.get("filterRadius", 3.6)), 2.2, 7.0)),
         poisson_ratio=float(clamp(float(raw.get("poissonRatio", 0.33)), 0.05, 0.49)),
+        manufacturing_bias=float(clamp(float(raw.get("manufacturingBias", 0.42)), 0.20, 0.65)),
+        minimum_member_radius=float(clamp(float(raw.get("minimumMemberRadius", 2.8)), 1.8, 7.0)),
     )
 
 
 def node_id(ix: int, iy: int, ny: int) -> int:
     return ix * (ny + 1) + iy
+
+
+def element_id(ix: int, iy: int, ny: int) -> int:
+    return ix * ny + iy
 
 
 def quad4_plane_stress_ke(nu: float) -> np.ndarray:
@@ -134,189 +148,188 @@ def quad4_plane_stress_ke(nu: float) -> np.ndarray:
 def build_edof(nx: int, ny: int) -> np.ndarray:
     edof = np.zeros((nx * ny, 8), dtype=np.int64)
 
-    for ex in range(nx):
-        for ey in range(ny):
-            e = ex * ny + ey
-            n1 = node_id(ex, ey, ny)
-            n2 = node_id(ex + 1, ey, ny)
-            n3 = node_id(ex + 1, ey + 1, ny)
-            n4 = node_id(ex, ey + 1, ny)
-
-            edof[e] = [
-                2 * n1,
-                2 * n1 + 1,
-                2 * n2,
-                2 * n2 + 1,
-                2 * n3,
-                2 * n3 + 1,
-                2 * n4,
-                2 * n4 + 1,
-            ]
+    for ix in range(nx):
+        for iy in range(ny):
+            e = element_id(ix, iy, ny)
+            n1 = node_id(ix, iy, ny)
+            n2 = node_id(ix + 1, iy, ny)
+            n3 = node_id(ix + 1, iy + 1, ny)
+            n4 = node_id(ix, iy + 1, ny)
+            edof[e] = [2 * n1, 2 * n1 + 1, 2 * n2, 2 * n2 + 1, 2 * n3, 2 * n3 + 1, 2 * n4, 2 * n4 + 1]
 
     return edof
 
 
-def bolt_centers(nx: int, ny: int, bolt_count: int) -> List[Tuple[float, float]]:
-    bottom_y = ny * 0.17
-    top_y = ny * 0.80
-
-    if bolt_count == 1:
-        return [(nx * 0.50, bottom_y)]
-
-    if bolt_count == 2:
-        return [(nx * 0.27, bottom_y), (nx * 0.73, bottom_y)]
-
-    if bolt_count == 3:
-        return [(nx * 0.23, bottom_y), (nx * 0.77, bottom_y), (nx * 0.50, top_y)]
-
-    if bolt_count == 4:
-        return [
-            (nx * 0.23, bottom_y),
-            (nx * 0.77, bottom_y),
-            (nx * 0.23, top_y),
-            (nx * 0.77, top_y),
-        ]
-
-    out: List[Tuple[float, float]] = []
-    for i in range(bolt_count):
-        a = -math.pi / 2.0 + 2.0 * math.pi * i / bolt_count
-        out.append((nx * 0.50 + math.cos(a) * nx * 0.34, ny * 0.49 + math.sin(a) * ny * 0.32))
-    return out
-
-
-def load_nodes(nx: int, ny: int, direction: str) -> Tuple[List[Tuple[int, int]], Tuple[float, float]]:
-    if direction == "lateral":
-        x = nx
-        y_mid = int(round(ny * 0.55))
-        patch = max(2, int(round(ny * 0.06)))
-        nodes = [(x, y) for y in range(max(0, y_mid - patch), min(ny, y_mid + patch) + 1)]
-        return nodes, (nx * 0.95, float(y_mid))
-
-    if direction == "multi-axis":
-        patch = max(2, int(round(nx * 0.06)))
-        nodes = [(x, ny) for x in range(max(0, nx // 2 - patch), min(nx, nx // 2 + patch) + 1)]
-        nodes += [(nx, y) for y in range(int(ny * 0.48), int(ny * 0.62) + 1)]
-        return nodes, (nx * 0.58, ny * 0.93)
-
-    # vertical default: load enters through the upper center interface.
-    patch = max(2, int(round(nx * 0.065)))
-    x_mid = int(round(nx * 0.50))
-    nodes = [(x, ny) for x in range(max(0, x_mid - patch), min(nx, x_mid + patch) + 1)]
-    return nodes, (float(x_mid), ny * 0.92)
-
-
 def mark_disk(mask: np.ndarray, cx: float, cy: float, radius: float, value: bool = True) -> None:
     nx, ny = mask.shape
-    xs = np.arange(nx) + 0.5
-    ys = np.arange(ny) + 0.5
-    xx, yy = np.meshgrid(xs, ys, indexing="ij")
+    x = np.arange(nx) + 0.5
+    y = np.arange(ny) + 0.5
+    xx, yy = np.meshgrid(x, y, indexing="ij")
     mask[np.hypot(xx - cx, yy - cy) <= radius] = value
+
+
+def add_disk_value(field: np.ndarray, cx: float, cy: float, radius: float, value: float) -> None:
+    nx, ny = field.shape
+    x = np.arange(nx) + 0.5
+    y = np.arange(ny) + 0.5
+    xx, yy = np.meshgrid(x, y, indexing="ij")
+    dist = np.hypot(xx - cx, yy - cy)
+    inside = dist <= radius
+    if radius <= 0:
+        return
+    falloff = np.clip(1.0 - dist / radius, 0.0, 1.0)
+    field[inside] = np.maximum(field[inside], value * (0.35 + 0.65 * falloff[inside]))
 
 
 def mark_path(mask: np.ndarray, ax: float, ay: float, bx: float, by: float, radius: float) -> None:
     nx, ny = mask.shape
-    xs = np.arange(nx) + 0.5
-    ys = np.arange(ny) + 0.5
-    xx, yy = np.meshgrid(xs, ys, indexing="ij")
-
+    x = np.arange(nx) + 0.5
+    y = np.arange(ny) + 0.5
+    xx, yy = np.meshgrid(x, y, indexing="ij")
     vx = bx - ax
     vy = by - ay
     denom = max(vx * vx + vy * vy, 1.0e-9)
     t = np.clip(((xx - ax) * vx + (yy - ay) * vy) / denom, 0.0, 1.0)
     px = ax + t * vx
     py = ay + t * vy
-
     mask[np.hypot(xx - px, yy - py) <= radius] = True
 
 
-def build_masks_and_loads(s: TopologyInput) -> MasksAndLoads:
+def add_path_value(field: np.ndarray, ax: float, ay: float, bx: float, by: float, radius: float, value: float) -> None:
+    nx, ny = field.shape
+    x = np.arange(nx) + 0.5
+    y = np.arange(ny) + 0.5
+    xx, yy = np.meshgrid(x, y, indexing="ij")
+    vx = bx - ax
+    vy = by - ay
+    denom = max(vx * vx + vy * vy, 1.0e-9)
+    t = np.clip(((xx - ax) * vx + (yy - ay) * vy) / denom, 0.0, 1.0)
+    px = ax + t * vx
+    py = ay + t * vy
+    dist = np.hypot(xx - px, yy - py)
+    inside = dist <= radius
+    falloff = np.clip(1.0 - dist / max(radius, 1.0e-9), 0.0, 1.0)
+    field[inside] = np.maximum(field[inside], value * (0.30 + 0.70 * falloff[inside]))
+
+
+def compute_bolt_centers(nx: int, ny: int, bolt_count: int) -> List[Tuple[float, float]]:
+    bottom_y = ny * 0.20
+    top_y = ny * 0.75
+    if bolt_count == 1:
+        return [(nx * 0.50, bottom_y)]
+    if bolt_count == 2:
+        return [(nx * 0.25, bottom_y), (nx * 0.75, bottom_y)]
+    if bolt_count == 3:
+        return [(nx * 0.22, bottom_y), (nx * 0.78, bottom_y), (nx * 0.50, top_y)]
+    if bolt_count == 4:
+        return [(nx * 0.22, bottom_y), (nx * 0.78, bottom_y), (nx * 0.22, top_y), (nx * 0.78, top_y)]
+    centers: List[Tuple[float, float]] = []
+    for i in range(bolt_count):
+        angle = -math.pi / 2.0 + 2.0 * math.pi * i / bolt_count
+        centers.append((nx * 0.50 + math.cos(angle) * nx * 0.34, ny * 0.48 + math.sin(angle) * ny * 0.31))
+    return centers
+
+
+def compute_load_nodes(nx: int, ny: int, direction: str) -> Tuple[List[Tuple[int, int]], Tuple[float, float]]:
+    if direction == "lateral":
+        y_center = int(round(ny * 0.56))
+        patch = max(2, int(round(ny * 0.075)))
+        return [(nx, y) for y in range(max(0, y_center - patch), min(ny, y_center + patch) + 1)], (nx * 0.93, float(y_center))
+    if direction == "multi-axis":
+        patch = max(2, int(round(nx * 0.08)))
+        x_center = int(round(nx * 0.50))
+        top_nodes = [(x, ny) for x in range(max(0, x_center - patch), min(nx, x_center + patch) + 1)]
+        side_nodes = [(nx, y) for y in range(int(ny * 0.48), int(ny * 0.64) + 1)]
+        return top_nodes + side_nodes, (nx * 0.60, ny * 0.90)
+    patch = max(3, int(round(nx * 0.085)))
+    x_center = int(round(nx * 0.50))
+    return [(x, ny) for x in range(max(0, x_center - patch), min(nx, x_center + patch) + 1)], (float(x_center), ny * 0.88)
+
+
+def build_model(s: TopologyInput) -> ModelDefinition:
     nx, ny = s.nx, s.ny
     ndof = 2 * (nx + 1) * (ny + 1)
-
     forced_solid = np.zeros((nx, ny), dtype=bool)
     forced_void = np.zeros((nx, ny), dtype=bool)
-
-    centers = bolt_centers(nx, ny, s.bolt_count)
-    loads, load_center = load_nodes(nx, ny, s.load_direction)
-
+    preferred = np.zeros((nx, ny), dtype=float)
     ref = max(nx, ny)
-    hole_r = ref * 0.035
-    pad_r = ref * 0.088
-    fixed_r = ref * 0.072
-    strut_r = max(1.4, ref * 0.018)
+    bolt_hole_radius = ref * 0.038
+    bolt_boss_radius = ref * 0.105
+    load_pad_radius = ref * 0.095
+    main_member_radius = max(s.minimum_member_radius, ref * 0.034)
+    secondary_member_radius = max(s.minimum_member_radius * 0.72, ref * 0.022)
+    ring_radius = ref * 0.110
+    centers = compute_bolt_centers(nx, ny, s.bolt_count)
+    loads, load_center = compute_load_nodes(nx, ny, s.load_direction)
 
-    # True interface logic:
-    # - bolt holes are forced void
-    # - bolt bosses/rings are forced solid
-    # - the load pad is forced solid
-    # - thin seed paths connect each bolt ring to the load pad so the optimizer
-    #   starts with real load-path options instead of filling the whole slab.
     for bx, by in centers:
-        mark_disk(forced_void, bx, by, hole_r, True)
-        mark_disk(forced_solid, bx, by, pad_r, True)
-        mark_path(forced_solid, bx, by, load_center[0], load_center[1], strut_r)
+        mark_disk(forced_void, bx, by, bolt_hole_radius, True)
+        mark_disk(forced_solid, bx, by, bolt_boss_radius, True)
+        add_disk_value(preferred, bx, by, ring_radius, 1.0)
+    mark_disk(forced_solid, load_center[0], load_center[1], load_pad_radius, True)
+    add_disk_value(preferred, load_center[0], load_center[1], load_pad_radius * 1.25, 1.0)
 
-    mark_disk(forced_solid, load_center[0], load_center[1], ref * 0.082, True)
+    for bx, by in centers:
+        mark_path(forced_solid, bx, by, load_center[0], load_center[1], secondary_member_radius * 0.55)
+        add_path_value(preferred, bx, by, load_center[0], load_center[1], main_member_radius, 0.95)
 
-    # Keep boundary slightly open except near real interfaces. This reduces the
-    # slab-like "filled rectangle" tendency.
+    if len(centers) >= 2:
+        lower = sorted(centers, key=lambda p: p[1])[: min(2, len(centers))]
+        if len(lower) == 2:
+            add_path_value(preferred, lower[0][0], lower[0][1], lower[1][0], lower[1][1], main_member_radius * 0.95, 0.82)
+            mark_path(forced_solid, lower[0][0], lower[0][1], lower[1][0], lower[1][1], secondary_member_radius * 0.45)
+
+    for bx, by in centers:
+        offset = (-1 if bx > nx * 0.5 else 1) * nx * 0.08
+        add_path_value(preferred, bx, by, load_center[0] + offset, load_center[1] - ny * 0.08, secondary_member_radius, 0.58)
+
     border = max(1, int(round(ref * 0.018)))
     forced_void[:border, :] = True
     forced_void[-border:, :] = True
     forced_void[:, :border] = True
     forced_void[:, -border:] = True
-
-    # Then restore solid interface areas over the border mask.
     for bx, by in centers:
-        mark_disk(forced_void, bx, by, hole_r, True)
-        mark_disk(forced_solid, bx, by, pad_r, True)
-    mark_disk(forced_solid, load_center[0], load_center[1], ref * 0.082, True)
-
+        mark_disk(forced_void, bx, by, bolt_hole_radius, True)
+        mark_disk(forced_solid, bx, by, bolt_boss_radius, True)
+    mark_disk(forced_solid, load_center[0], load_center[1], load_pad_radius, True)
     forced_solid[forced_void] = False
 
     fixed = set()
+    fixed_radius_inner = bolt_hole_radius * 0.90
+    fixed_radius_outer = bolt_boss_radius * 0.82
     for ix in range(nx + 1):
         for iy in range(ny + 1):
             for bx, by in centers:
                 d = math.hypot(ix - bx, iy - by)
-                if hole_r * 0.85 <= d <= fixed_r:
-                    nid = node_id(ix, iy, ny)
-                    fixed.add(2 * nid)
-                    fixed.add(2 * nid + 1)
-
+                if fixed_radius_inner <= d <= fixed_radius_outer:
+                    n = node_id(ix, iy, ny)
+                    fixed.add(2 * n)
+                    fixed.add(2 * n + 1)
     if not fixed:
         for bx, by in centers:
             ix = int(round(clamp(bx, 0, nx)))
             iy = int(round(clamp(by, 0, ny)))
-            nid = node_id(ix, iy, ny)
-            fixed.add(2 * nid)
-            fixed.add(2 * nid + 1)
+            n = node_id(ix, iy, ny)
+            fixed.add(2 * n)
+            fixed.add(2 * n + 1)
 
     force = np.zeros(ndof, dtype=float)
-    per_node = s.force_n * s.safety_factor / max(1, len(loads))
-
+    per_node_force = s.force_n * s.safety_factor / max(1, len(loads))
     for ix, iy in loads:
         ix = int(clamp(ix, 0, nx))
         iy = int(clamp(iy, 0, ny))
-        nid = node_id(ix, iy, ny)
-
+        n = node_id(ix, iy, ny)
         if s.load_direction == "lateral":
-            force[2 * nid] += per_node
+            force[2 * n] += per_node_force
         elif s.load_direction == "multi-axis":
-            force[2 * nid] += per_node * 0.35
-            force[2 * nid + 1] -= per_node * 0.85
+            force[2 * n] += per_node_force * 0.35
+            force[2 * n + 1] -= per_node_force * 0.90
         else:
-            force[2 * nid + 1] -= per_node
+            force[2 * n + 1] -= per_node_force
 
-    return MasksAndLoads(
-        forced_solid=forced_solid,
-        forced_void=forced_void,
-        fixed_dofs=np.array(sorted(fixed), dtype=np.int64),
-        force=force,
-        bolt_centers=centers,
-        load_nodes=loads,
-        load_interface_center=load_center,
-    )
+    preferred[forced_solid] = 1.0
+    preferred[forced_void] = 0.0
+    return ModelDefinition(forced_solid, forced_void, np.clip(preferred, 0.0, 1.0), np.array(sorted(fixed), dtype=np.int64), force, centers, load_center, loads)
 
 
 def build_filter(nx: int, ny: int, radius: float) -> Tuple[Any, np.ndarray]:
@@ -324,259 +337,266 @@ def build_filter(nx: int, ny: int, radius: float) -> Tuple[Any, np.ndarray]:
     cols: List[int] = []
     data: List[float] = []
     r = int(math.ceil(radius))
-
-    for ex in range(nx):
-        for ey in range(ny):
-            row = ex * ny + ey
-            for kx in range(max(0, ex - r), min(nx, ex + r + 1)):
-                for ky in range(max(0, ey - r), min(ny, ey + r + 1)):
-                    col = kx * ny + ky
-                    dist = math.sqrt((ex - kx) ** 2 + (ey - ky) ** 2)
-                    weight = max(0.0, radius - dist)
+    for ix in range(nx):
+        for iy in range(ny):
+            row = element_id(ix, iy, ny)
+            for kx in range(max(0, ix - r), min(nx, ix + r + 1)):
+                for ky in range(max(0, iy - r), min(ny, iy + r + 1)):
+                    col = element_id(kx, ky, ny)
+                    distance = math.sqrt((ix - kx) ** 2 + (iy - ky) ** 2)
+                    weight = max(0.0, radius - distance)
                     if weight > 0:
                         rows.append(row)
                         cols.append(col)
                         data.append(weight)
-
     h = coo_matrix((data, (rows, cols)), shape=(nx * ny, nx * ny)).tocsr()
     hs = np.asarray(h.sum(axis=1)).ravel()
     hs[hs == 0] = 1.0
     return h, hs
 
 
-def assemble_and_solve(
-    density: np.ndarray,
-    edof: np.ndarray,
-    ke: np.ndarray,
-    free_dofs: np.ndarray,
-    force: np.ndarray,
-    penalization: float,
-) -> Tuple[np.ndarray, np.ndarray, float]:
+def assemble_and_solve(density: np.ndarray, edof: np.ndarray, ke: np.ndarray, free_dofs: np.ndarray, force: np.ndarray, penalization: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     ndof = force.size
-    nele = density.size
-
     i_k = np.kron(edof, np.ones((8, 1), dtype=np.int64)).ravel()
     j_k = np.kron(edof, np.ones((1, 8), dtype=np.int64)).ravel()
-
-    e_min = 1.0e-6
+    e_min = 1.0e-5
     e_values = e_min + np.power(density.ravel(), penalization) * (1.0 - e_min)
     s_k = (ke.ravel()[None, :] * e_values[:, None]).ravel()
-
     k_global = coo_matrix((s_k, (i_k, j_k)), shape=(ndof, ndof)).tocsc()
     k_free = k_global[free_dofs, :][:, free_dofs]
     f_free = force[free_dofs]
-
     u = np.zeros(ndof, dtype=float)
     u[free_dofs] = spsolve(k_free, f_free)
-
     ue = u[edof]
     ce = np.einsum("ij,ij->i", ue @ ke, ue)
-
     compliance = float(np.dot(e_values, ce))
     dc = -penalization * (1.0 - e_min) * np.power(density.ravel(), penalization - 1.0) * ce
-    dc = dc.reshape(density.shape)
-
-    return u, dc, compliance
+    return u, dc.reshape(density.shape), ce.reshape(density.shape), compliance
 
 
-def optimality_update(
-    x: np.ndarray,
-    dc: np.ndarray,
-    target_volume_fraction: float,
-    forced_solid: np.ndarray,
-    forced_void: np.ndarray,
-    h: Any,
-    hs: np.ndarray,
-) -> np.ndarray:
+def local_average(x: np.ndarray, radius: int) -> np.ndarray:
+    nx, ny = x.shape
+    out = np.zeros_like(x)
+    for ix in range(nx):
+        for iy in range(ny):
+            total = 0.0
+            weight = 0.0
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    dist = math.sqrt(dx * dx + dy * dy)
+                    if dist > radius + 0.001:
+                        continue
+                    sx = ix + dx
+                    sy = iy + dy
+                    if sx < 0 or sy < 0 or sx >= nx or sy >= ny:
+                        continue
+                    w = 1.0 / (1.0 + dist)
+                    total += x[sx, sy] * w
+                    weight += w
+            out[ix, iy] = total / max(weight, 1.0e-9)
+    return out
+
+
+def filter_sensitivity(x: np.ndarray, dc: np.ndarray, h: Any, hs: np.ndarray) -> np.ndarray:
     x_flat = x.ravel()
     dc_flat = dc.ravel()
+    filtered = np.asarray((h @ (x_flat * dc_flat)) / np.maximum(1.0e-9, hs * np.maximum(0.001, x_flat))).ravel()
+    return np.minimum(filtered.reshape(x.shape), -1.0e-12)
 
-    # Sensitivity filtering.
-    filtered_dc = np.asarray((h @ (x_flat * dc_flat)) / np.maximum(1.0e-9, hs * np.maximum(1.0e-3, x_flat))).ravel()
-    filtered_dc = np.minimum(filtered_dc, -1.0e-12)
 
-    move = 0.16
-    low = 0.0
-    high = 1.0e9
-
+def optimality_update(x: np.ndarray, dc: np.ndarray, target_volume_fraction: float, forced_solid: np.ndarray, forced_void: np.ndarray) -> np.ndarray:
+    x_flat = x.ravel()
+    dc_flat = np.minimum(dc.ravel(), -1.0e-12)
     solid_flat = forced_solid.ravel()
     void_flat = forced_void.ravel()
     designable = ~(solid_flat | void_flat)
-
-    passive_solid_volume = float(np.count_nonzero(solid_flat))
-    passive_void_volume = float(np.count_nonzero(void_flat))
     total = float(x_flat.size)
-    target_total_solid = target_volume_fraction * total
-    designable_target = clamp(
-        (target_total_solid - passive_solid_volume) / max(1.0, total - passive_solid_volume - passive_void_volume),
-        0.08,
-        0.92,
-    )
-
+    passive_solid = float(np.count_nonzero(solid_flat))
+    passive_void = float(np.count_nonzero(void_flat))
+    designable_target = clamp((target_volume_fraction * total - passive_solid) / max(1.0, total - passive_solid - passive_void), 0.16, 0.94)
+    move = 0.115
+    low = 0.0
+    high = 1.0e9
     candidate = x_flat.copy()
-
     while high - low > 1.0e-4:
         mid = 0.5 * (low + high)
-        update = x_flat * np.sqrt(-filtered_dc / max(mid, 1.0e-12))
+        update = x_flat * np.sqrt(-dc_flat / max(mid, 1.0e-12))
         update = np.maximum(x_flat - move, np.minimum(x_flat + move, update))
         update = np.clip(update, 0.001, 1.0)
-
         candidate[:] = x_flat
         candidate[designable] = update[designable]
         candidate[solid_flat] = 1.0
         candidate[void_flat] = 0.001
-
         designable_mean = float(np.mean(candidate[designable])) if np.any(designable) else 0.0
-
         if designable_mean > designable_target:
             low = mid
         else:
             high = mid
-
     return candidate.reshape(x.shape)
 
 
-def projection(x: np.ndarray, beta: float = 8.0, eta: float = 0.47) -> np.ndarray:
+def dilate_2d(x: np.ndarray, radius: int) -> np.ndarray:
+    nx, ny = x.shape
+    out = np.copy(x)
+    for ix in range(nx):
+        for iy in range(ny):
+            best = x[ix, iy]
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    dist = math.sqrt(dx * dx + dy * dy)
+                    if dist > radius + 0.001:
+                        continue
+                    sx = ix + dx
+                    sy = iy + dy
+                    if sx < 0 or sy < 0 or sx >= nx or sy >= ny:
+                        continue
+                    falloff = 1.0 - dist / (radius + 1.0)
+                    best = max(best, x[sx, sy] * (0.70 + 0.30 * falloff))
+            out[ix, iy] = best
+    return out
+
+
+def erode_2d(x: np.ndarray, radius: int) -> np.ndarray:
+    nx, ny = x.shape
+    out = np.copy(x)
+    for ix in range(nx):
+        for iy in range(ny):
+            worst = x[ix, iy]
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    dist = math.sqrt(dx * dx + dy * dy)
+                    if dist > radius + 0.001:
+                        continue
+                    sx = ix + dx
+                    sy = iy + dy
+                    if sx < 0 or sy < 0 or sx >= nx or sy >= ny:
+                        worst = 0.0
+                        continue
+                    worst = min(worst, x[sx, sy])
+            out[ix, iy] = worst
+    return out
+
+
+def morphological_close_open(x: np.ndarray, radius: int, forced_solid: np.ndarray, forced_void: np.ndarray) -> np.ndarray:
+    y = dilate_2d(x, radius)
+    y = erode_2d(y, radius)
+    y = erode_2d(y, max(1, radius - 1))
+    y = dilate_2d(y, max(1, radius - 1))
+    y = 0.62 * y + 0.38 * x
+    y[forced_solid] = 1.0
+    y[forced_void] = 0.0
+    return np.clip(y, 0.0, 1.0)
+
+
+def projection(x: np.ndarray, beta: float, eta: float) -> np.ndarray:
     numerator = np.tanh(beta * eta) + np.tanh(beta * (x - eta))
     denominator = np.tanh(beta * eta) + np.tanh(beta * (1.0 - eta))
     return np.clip(numerator / denominator, 0.0, 1.0)
 
 
-def add_design_intent_field(
-    x: np.ndarray,
-    masks: MasksAndLoads,
-    strength: float,
-) -> np.ndarray:
-    """Small deterministic nudge toward useful bracket load paths.
-
-    This is not fake geometry. It does not create the final shape. It simply
-    avoids numerical local minima where the optimizer leaves a large slab by
-    seeding viable tension/compression paths between required interfaces.
-    """
+def connected_component_cleanup(x: np.ndarray, forced_solid: np.ndarray, threshold: float = 0.30) -> np.ndarray:
     nx, ny = x.shape
-    intent = np.zeros_like(x)
-
-    ref = max(nx, ny)
-    r_main = max(1.2, ref * 0.020)
-    r_light = max(1.0, ref * 0.014)
-    load_x, load_y = masks.load_interface_center
-
-    for bx, by in masks.bolt_centers:
-        path = np.zeros_like(x, dtype=bool)
-        mark_path(path, bx, by, load_x, load_y, r_main)
-        intent[path] = np.maximum(intent[path], 1.0)
-
-    if len(masks.bolt_centers) >= 2:
-        for i in range(len(masks.bolt_centers)):
-            ax, ay = masks.bolt_centers[i]
-            bx, by = masks.bolt_centers[(i + 1) % len(masks.bolt_centers)]
-            path = np.zeros_like(x, dtype=bool)
-            mark_path(path, ax, ay, bx, by, r_light)
-            intent[path] = np.maximum(intent[path], 0.55)
-
-    return np.clip(x * (1.0 - strength) + intent * strength, 0.001, 1.0)
+    solid = x >= threshold
+    seeds = list(zip(*np.where(forced_solid)))
+    if not seeds:
+        return x
+    visited = np.zeros_like(solid, dtype=bool)
+    queue: List[Tuple[int, int]] = []
+    for sx, sy in seeds:
+        if solid[sx, sy]:
+            visited[sx, sy] = True
+            queue.append((int(sx), int(sy)))
+    head = 0
+    while head < len(queue):
+        ix, iy = queue[head]
+        head += 1
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx_i = ix + dx
+            ny_i = iy + dy
+            if nx_i < 0 or ny_i < 0 or nx_i >= nx or ny_i >= ny:
+                continue
+            if visited[nx_i, ny_i] or not solid[nx_i, ny_i]:
+                continue
+            visited[nx_i, ny_i] = True
+            queue.append((nx_i, ny_i))
+    cleaned = np.copy(x)
+    cleaned[np.logical_and(solid, ~visited)] = 0.0
+    return cleaned
 
 
 def run_simp(s: TopologyInput) -> Tuple[np.ndarray, Dict[str, Any]]:
     nx, ny = s.nx, s.ny
-    masks = build_masks_and_loads(s)
-
-    volume_fraction = 1.0 - s.target_open_area_percent / 100.0
-    volume_fraction = clamp(volume_fraction, 0.22, 0.75)
-
+    target_volume_fraction = clamp(1.0 - s.target_open_area_percent / 100.0, 0.38, 0.68)
+    model = build_model(s)
     edof = build_edof(nx, ny)
     ke = quad4_plane_stress_ke(s.poisson_ratio)
+    all_dofs = np.arange(model.force.size)
+    free_dofs = np.setdiff1d(all_dofs, model.fixed_dofs)
     h, hs = build_filter(nx, ny, s.filter_radius)
-
-    all_dofs = np.arange(masks.force.size)
-    free_dofs = np.setdiff1d(all_dofs, masks.fixed_dofs)
-
-    # Start open, not slab-like. Forced solids and required seeded load paths
-    # help the solver find bracket truss members instead of filling a block.
-    x = np.full((nx, ny), volume_fraction, dtype=float)
-    x[masks.forced_solid] = 1.0
-    x[masks.forced_void] = 0.001
-    x = add_design_intent_field(x, masks, strength=0.22)
-    x[masks.forced_solid] = 1.0
-    x[masks.forced_void] = 0.001
-
+    x = np.full((nx, ny), target_volume_fraction, dtype=float)
+    x = np.maximum(x, model.preferred_structure * s.manufacturing_bias)
+    x[model.forced_solid] = 1.0
+    x[model.forced_void] = 0.001
     history: List[Dict[str, float]] = []
-    last_change = 1.0
     compliance = 0.0
+    change = 1.0
 
     for iteration in range(1, s.max_iterations + 1):
-        _, dc, compliance = assemble_and_solve(
-            density=x,
-            edof=edof,
-            ke=ke,
-            free_dofs=free_dofs,
-            force=masks.force,
-            penalization=s.penalization,
-        )
-
-        updated = optimality_update(
-            x=x,
-            dc=dc,
-            target_volume_fraction=volume_fraction,
-            forced_solid=masks.forced_solid,
-            forced_void=masks.forced_void,
-            h=h,
-            hs=hs,
-        )
-
-        # Continue giving a shrinking load-path nudge during early iterations.
-        if iteration < max(12, s.min_iterations // 2):
-            updated = add_design_intent_field(updated, masks, strength=0.08)
-
-        updated[masks.forced_solid] = 1.0
-        updated[masks.forced_void] = 0.001
-
-        last_change = float(np.max(np.abs(updated - x)))
+        _u, dc, ce, compliance = assemble_and_solve(x, edof, ke, free_dofs, model.force, s.penalization)
+        dc = filter_sensitivity(x, dc, h, hs)
+        reward = -s.manufacturing_bias * model.preferred_structure * (1.20 - np.clip(x, 0.0, 1.0))
+        thickness_reward = -0.20 * np.clip(local_average(x, 2) - x, 0.0, 1.0)
+        dc = dc + reward + thickness_reward
+        updated = optimality_update(x, dc, target_volume_fraction, model.forced_solid, model.forced_void)
+        if iteration % 4 == 0 or iteration < 18:
+            updated = morphological_close_open(updated, max(1, int(round(s.minimum_member_radius * 0.55))), model.forced_solid, model.forced_void)
+        if iteration <= max(25, s.min_iterations):
+            taper = 1.0 - (iteration / max(1.0, float(max(25, s.min_iterations))))
+            blend = s.manufacturing_bias * 0.26 * taper
+            updated = np.maximum(updated, model.preferred_structure * blend)
+        updated[model.forced_solid] = 1.0
+        updated[model.forced_void] = 0.001
+        change = float(np.max(np.abs(updated - x)))
         x = updated
-
-        if iteration % 5 == 0 or iteration == 1:
-            history.append(
-                {
-                    "iteration": float(iteration),
-                    "compliance": float(compliance),
-                    "change": float(last_change),
-                    "meanDensity": float(np.mean(x)),
-                }
-            )
-
-        if iteration >= s.min_iterations and last_change <= s.change_tolerance:
+        if iteration == 1 or iteration % 5 == 0:
+            history.append({"iteration": float(iteration), "compliance": float(compliance), "change": float(change), "meanDensity": float(np.mean(x)), "maxElementEnergy": float(np.max(ce))})
+        if iteration >= s.min_iterations and change <= s.change_tolerance:
             break
 
-    projected = projection(x, beta=9.0, eta=0.49)
-    projected[masks.forced_solid] = 1.0
-    projected[masks.forced_void] = 0.0
-
-    # Remove isolated low-value fog but keep the result density-based.
-    projected = np.where(projected >= 0.20, projected, 0.0)
+    x = morphological_close_open(x, max(1, int(round(s.minimum_member_radius * 0.75))), model.forced_solid, model.forced_void)
+    x = 0.82 * x + 0.18 * model.preferred_structure
+    x[model.forced_solid] = 1.0
+    x[model.forced_void] = 0.0
+    projected = projection(x, beta=7.5, eta=0.42)
+    projected = connected_component_cleanup(projected, model.forced_solid, threshold=0.22)
+    projected[model.forced_solid] = 1.0
+    projected[model.forced_void] = 0.0
+    projected = np.where(projected >= 0.10, projected, 0.0)
 
     metadata = {
         "engine": ENGINE,
-        "iterations": len(history) * 5 if history else s.max_iterations,
-        "converged": bool(last_change <= s.change_tolerance),
-        "compliance": round(float(compliance), 5),
-        "change": round(float(last_change), 6),
+        "priority": "strong-manufacturable",
+        "iterations": int(history[-1]["iteration"]) if history else s.max_iterations,
+        "converged": bool(change <= s.change_tolerance),
+        "compliance": round(float(compliance), 6),
+        "change": round(float(change), 6),
         "volumeFraction": round(float(np.mean(projected)), 4),
-        "targetVolumeFraction": round(float(volume_fraction), 4),
+        "targetVolumeFraction": round(float(target_volume_fraction), 4),
         "targetOpenAreaPercent": round(float(s.target_open_area_percent), 2),
+        "manufacturingBias": round(float(s.manufacturing_bias), 3),
+        "minimumMemberRadius": round(float(s.minimum_member_radius), 3),
         "penalization": round(float(s.penalization), 3),
         "filterRadius": round(float(s.filter_radius), 3),
-        "fixedDofCount": int(len(masks.fixed_dofs)),
-        "boltCenters": [{"x": round(float(x), 3), "y": round(float(y), 3)} for x, y in masks.bolt_centers],
-        "loadInterfaceCenter": {
-            "x": round(float(masks.load_interface_center[0]), 3),
-            "y": round(float(masks.load_interface_center[1]), 3),
-        },
-        "loadNodeCount": int(len(masks.load_nodes)),
-        "forcedSolidCells": int(np.count_nonzero(masks.forced_solid)),
-        "forcedVoidCells": int(np.count_nonzero(masks.forced_void)),
-        "history": history[-12:],
+        "fixedDofCount": int(len(model.fixed_dofs)),
+        "forceNorm": round(float(np.linalg.norm(model.force)), 4),
+        "boltCenters": [{"x": round(float(x0), 3), "y": round(float(y0), 3)} for x0, y0 in model.bolt_centers],
+        "loadCenter": {"x": round(float(model.load_center[0]), 3), "y": round(float(model.load_center[1]), 3)},
+        "loadNodeCount": int(len(model.load_nodes)),
+        "forcedSolidCells": int(np.count_nonzero(model.forced_solid)),
+        "forcedVoidCells": int(np.count_nonzero(model.forced_void)),
+        "preferredStructureCells": int(np.count_nonzero(model.preferred_structure > 0.25)),
+        "history": history[-16:],
     }
-
     return projected, metadata
 
 
@@ -584,62 +604,31 @@ def extrude_to_3d(density_2d: np.ndarray, nz: int) -> List[List[List[float]]]:
     nx, ny = density_2d.shape
     out = np.zeros((nx, ny, nz), dtype=float)
     mid = (nz - 1) * 0.5
-
-    for z in range(nz):
-        normalized = abs(z - mid) / max(mid, 1.0e-9)
-        thickness_profile = 1.0 - 0.22 * (normalized ** 2)
-
-        # Slight edge softening lets the surface-net extractor produce rounded
-        # front/back edges instead of a hard extruded slab.
-        out[:, :, z] = np.clip(density_2d * thickness_profile, 0.0, 1.0)
-
+    for iz in range(nz):
+        d = abs(iz - mid) / max(mid, 1.0e-9)
+        profile = 1.0 - 0.18 * (d ** 2)
+        if d < 0.62:
+            profile = max(profile, 0.94)
+        out[:, :, iz] = np.clip(density_2d * profile, 0.0, 1.0)
     return out.tolist()
 
 
 def main() -> None:
     raw = sys.stdin.read().strip()
-
     if not raw and len(sys.argv) > 1:
         raw = sys.argv[1].strip()
-
     if not raw:
         raise ValueError("No topology input JSON was provided.")
-
     data = json.loads(raw)
     s = parse_input(data)
-
     density_2d, metadata = run_simp(s)
     density_3d = extrude_to_3d(density_2d, s.nz)
-
-    print(
-        json.dumps(
-            {
-                "ok": True,
-                "engine": ENGINE,
-                "density": density_3d,
-                "nx": s.nx,
-                "ny": s.ny,
-                "nz": s.nz,
-                "metadata": metadata,
-            },
-            separators=(",", ":"),
-        )
-    )
+    print(json.dumps({"ok": True, "engine": ENGINE, "density": density_3d, "nx": s.nx, "ny": s.ny, "nz": s.nz, "metadata": metadata}, separators=(",", ":")))
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        print(
-            json.dumps(
-                {
-                    "ok": False,
-                    "engine": ENGINE,
-                    "error": str(exc),
-                    "traceback": traceback.format_exc(),
-                },
-                separators=(",", ":"),
-            )
-        )
+        print(json.dumps({"ok": False, "engine": ENGINE, "error": str(exc), "traceback": traceback.format_exc()}, separators=(",", ":")))
         sys.exit(1)
