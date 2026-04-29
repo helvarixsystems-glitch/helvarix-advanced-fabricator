@@ -9,7 +9,7 @@ Action:
   REPLACE the existing file.
 
 Phase 2 objective:
-  Strong + manufacturable bracket topology.
+  Strong + manufacturable bracket topology, tuned for Render response time.
 
 This solver intentionally prioritizes:
   - thicker members
@@ -44,27 +44,27 @@ except Exception as exc:
     ) from exc
 
 
-ENGINE = "haf-simp-manufacturable-bracket-v4"
+ENGINE = "haf-simp-manufacturable-bracket-v4-fast"
 
 
 @dataclass
 class TopologyInput:
-    nx: int = 84
-    ny: int = 54
-    nz: int = 20
+    nx: int = 56
+    ny: int = 36
+    nz: int = 14
     load_direction: str = "vertical"
     bolt_count: int = 2
-    target_open_area_percent: float = 54.0
+    target_open_area_percent: float = 48.0
     safety_factor: float = 1.5
     force_n: float = 2500.0
-    max_iterations: int = 120
-    min_iterations: int = 50
-    change_tolerance: float = 0.008
+    max_iterations: int = 62
+    min_iterations: int = 24
+    change_tolerance: float = 0.014
     penalization: float = 3.15
-    filter_radius: float = 3.6
+    filter_radius: float = 2.8
     poisson_ratio: float = 0.33
-    manufacturing_bias: float = 0.42
-    minimum_member_radius: float = 2.8
+    manufacturing_bias: float = 0.50
+    minimum_member_radius: float = 2.3
 
 
 @dataclass
@@ -84,26 +84,26 @@ def clamp(value: float, low: float, high: float) -> float:
 
 
 def parse_input(raw: Dict[str, Any]) -> TopologyInput:
-    target_open = float(raw.get("targetOpenAreaPercent", 54.0))
+    target_open = float(raw.get("targetOpenAreaPercent", 48.0))
     target_open = clamp(target_open, 38.0, 62.0)
 
     return TopologyInput(
-        nx=int(clamp(int(raw.get("nx", 84)), 32, 132)),
-        ny=int(clamp(int(raw.get("ny", 54)), 28, 100)),
-        nz=int(clamp(int(raw.get("nz", 20)), 8, 50)),
+        nx=int(clamp(int(raw.get("nx", 56)), 32, 72)),
+        ny=int(clamp(int(raw.get("ny", 36)), 24, 56)),
+        nz=int(clamp(int(raw.get("nz", 14)), 8, 24)),
         load_direction=str(raw.get("loadDirection", "vertical")).lower().strip(),
         bolt_count=int(clamp(int(raw.get("boltCount", 2)), 1, 8)),
         target_open_area_percent=target_open,
         safety_factor=float(clamp(float(raw.get("safetyFactor", 1.5)), 1.0, 4.0)),
         force_n=float(clamp(float(raw.get("forceN", 2500.0)), 10.0, 1.0e7)),
-        max_iterations=int(clamp(int(raw.get("maxIterations", 120)), 60, 220)),
-        min_iterations=int(clamp(int(raw.get("minIterations", 50)), 25, 120)),
-        change_tolerance=float(clamp(float(raw.get("changeTolerance", 0.008)), 0.002, 0.04)),
+        max_iterations=int(clamp(int(raw.get("maxIterations", 62)), 35, 85)),
+        min_iterations=int(clamp(int(raw.get("minIterations", 24)), 12, 40)),
+        change_tolerance=float(clamp(float(raw.get("changeTolerance", 0.014)), 0.006, 0.05)),
         penalization=float(clamp(float(raw.get("penalization", 3.15)), 2.4, 4.2)),
-        filter_radius=float(clamp(float(raw.get("filterRadius", 3.6)), 2.2, 7.0)),
+        filter_radius=float(clamp(float(raw.get("filterRadius", 2.8)), 1.8, 4.2)),
         poisson_ratio=float(clamp(float(raw.get("poissonRatio", 0.33)), 0.05, 0.49)),
-        manufacturing_bias=float(clamp(float(raw.get("manufacturingBias", 0.42)), 0.20, 0.65)),
-        minimum_member_radius=float(clamp(float(raw.get("minimumMemberRadius", 2.8)), 1.8, 7.0)),
+        manufacturing_bias=float(clamp(float(raw.get("manufacturingBias", 0.50)), 0.30, 0.70)),
+        minimum_member_radius=float(clamp(float(raw.get("minimumMemberRadius", 2.3)), 1.6, 4.2)),
     )
 
 
