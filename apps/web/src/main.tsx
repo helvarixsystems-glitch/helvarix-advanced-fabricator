@@ -83,7 +83,8 @@ function App() {
   const [submittingExport, setSubmittingExport] = React.useState(false);
   const [generationStartedAt, setGenerationStartedAt] = React.useState<number | null>(null);
   const [generationElapsedMs, setGenerationElapsedMs] = React.useState(0);
-  const [generationNoticeDismissed, setGenerationNoticeDismissed] = React.useState(false);
+  const [generationMonitorId, setGenerationMonitorId] = React.useState<string | null>(null);
+  const [generationProgressVisible, setGenerationProgressVisible] = React.useState(false);
 
   const [selectedFamily, setSelectedFamily] = React.useState<ComponentFamily>(
     componentRegistry[0].key
@@ -112,18 +113,33 @@ function App() {
 
   const validationMessages = displayGeneration?.result?.validations ?? [];
   const result = displayGeneration?.result ?? null;
-  const generationInProgress =
+
+  const monitoredGeneration = React.useMemo(
+    () =>
+      generationMonitorId
+        ? generations.find((generation) => generation.id === generationMonitorId) ?? null
+        : null,
+    [generations, generationMonitorId]
+  );
+
+  const monitoredResult = monitoredGeneration?.result ?? null;
+  const monitoredStatus = monitoredGeneration?.status;
+  const monitorIsActive =
     submittingGeneration ||
     submittingIteration ||
-    displayGeneration?.status === "queued" ||
-    displayGeneration?.status === "running";
+    monitoredStatus === "queued" ||
+    monitoredStatus === "running";
+  const monitorHasTerminalResult =
+    monitoredStatus === "completed" ||
+    monitoredStatus === "failed";
   const generationProgress = getGenerationProgress({
-    status: displayGeneration?.status,
+    status: monitoredStatus,
     submitting: submittingGeneration || submittingIteration,
     elapsedMs: generationElapsedMs,
-    result
+    result: monitoredResult
   });
-  const showGenerationProgress = generationInProgress && !generationNoticeDismissed;
+  const showGenerationProgress =
+    generationProgressVisible && (monitorIsActive || monitorHasTerminalResult);
 
   React.useEffect(() => {
     void loadWorkspace();
@@ -156,26 +172,28 @@ function App() {
   }, [generations, activeProjectId]);
 
   React.useEffect(() => {
-    if (!generationInProgress) {
-      setGenerationStartedAt(null);
-      setGenerationElapsedMs(0);
-      setGenerationNoticeDismissed(false);
+    if (!generationProgressVisible) return;
+
+    if (monitorIsActive) {
+      setGenerationStartedAt((current) => current ?? Date.now());
       return;
     }
 
-    setGenerationNoticeDismissed(false);
-    setGenerationStartedAt((current) => current ?? Date.now());
-  }, [generationInProgress]);
+    if (!monitorHasTerminalResult) {
+      setGenerationStartedAt(null);
+      setGenerationElapsedMs(0);
+    }
+  }, [generationProgressVisible, monitorIsActive, monitorHasTerminalResult]);
 
   React.useEffect(() => {
-    if (!generationInProgress || generationStartedAt === null) return;
+    if (!generationProgressVisible || generationStartedAt === null) return;
 
     const tick = () => setGenerationElapsedMs(Date.now() - generationStartedAt);
     tick();
 
     const timer = window.setInterval(tick, 500);
     return () => window.clearInterval(timer);
-  }, [generationInProgress, generationStartedAt]);
+  }, [generationProgressVisible, generationStartedAt]);
 
   async function loadWorkspace() {
     setLoadingWorkspace(true);
@@ -253,9 +271,10 @@ function App() {
     }
 
     setSubmittingGeneration(true);
+    setGenerationMonitorId(null);
+    setGenerationProgressVisible(true);
     setGenerationStartedAt(Date.now());
     setGenerationElapsedMs(0);
-    setGenerationNoticeDismissed(false);
     setViewerMode("concept");
     setRightPanelTab("candidates");
 
@@ -280,6 +299,8 @@ function App() {
 
       if (data.generation?.id) {
         setSelectedGenerationId(data.generation.id);
+        setGenerationMonitorId(data.generation.id);
+        setGenerationProgressVisible(true);
       }
     } catch {
       alert("Could not reach the API.");
@@ -300,9 +321,10 @@ function App() {
     }
 
     setSubmittingIteration(true);
+    setGenerationMonitorId(null);
+    setGenerationProgressVisible(true);
     setGenerationStartedAt(Date.now());
     setGenerationElapsedMs(0);
-    setGenerationNoticeDismissed(false);
     setViewerMode("concept");
     setRightPanelTab("candidates");
 
@@ -328,6 +350,8 @@ function App() {
 
       if (data.generation?.id) {
         setSelectedGenerationId(data.generation.id);
+        setGenerationMonitorId(data.generation.id);
+        setGenerationProgressVisible(true);
       }
     } catch {
       alert("Could not reach the API.");
@@ -1345,8 +1369,8 @@ function App() {
             title={generationProgress.title}
             detail={generationProgress.detail}
             elapsedMs={generationElapsedMs}
-            status={displayGeneration?.status ?? (submittingGeneration || submittingIteration ? "submitted" : "idle")}
-            onDismiss={() => setGenerationNoticeDismissed(true)}
+            status={monitoredStatus ?? (submittingGeneration || submittingIteration ? "submitted" : "idle")}
+            onDismiss={() => setGenerationProgressVisible(false)}
           />
         ) : null}
       </div>
@@ -1549,6 +1573,14 @@ function getGenerationProgress(args: {
       percent: 100,
       title: "Solver mesh produced",
       detail: "A real renderMesh was returned and selected."
+    };
+  }
+
+  if (args.status === "completed") {
+    return {
+      percent: 100,
+      title: "No solver mesh produced",
+      detail: "The generation completed, but no real renderMesh was returned. The viewer correctly refused to display fake geometry."
     };
   }
 
