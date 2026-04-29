@@ -420,3 +420,140 @@ button:disabled {
     justify-content: flex-start;
   }
 }
+
+
+.generation-progress-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(17, 24, 39, 0.24);
+  backdrop-filter: blur(2px);
+}
+
+.generation-progress-card {
+  width: min(560px, calc(100vw - 48px));
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 24px 80px rgba(17, 24, 39, 0.24);
+  padding: 24px;
+}
+
+.generation-progress-topline,
+.generation-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.generation-progress-eyebrow,
+.generation-progress-meta,
+.generation-progress-note,
+.generation-progress-step {
+  font-family:
+    "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.generation-progress-eyebrow {
+  color: #667085;
+  font-size: 11px;
+  font-weight: 780;
+}
+
+.generation-progress-dismiss {
+  border: 1px solid var(--line-strong);
+  background: #ffffff;
+  padding: 8px 12px;
+  color: #111111;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 780;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.generation-progress-card h2 {
+  margin: 16px 0 8px;
+  font-size: 20px;
+  letter-spacing: 0.02em;
+}
+
+.generation-progress-card p {
+  margin: 0;
+  color: #475467;
+  line-height: 1.45;
+}
+
+.generation-progress-meter {
+  position: relative;
+  height: 14px;
+  margin-top: 22px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  background: rgba(17, 17, 17, 0.06);
+}
+
+.generation-progress-meter-fill {
+  height: 100%;
+  background: #111111;
+  transition: width 320ms ease;
+}
+
+.generation-progress-meta {
+  margin-top: 10px;
+  color: #667085;
+  font-size: 11px;
+}
+
+.generation-progress-steps {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.generation-progress-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #98a2b3;
+  font-size: 11px;
+  font-weight: 740;
+}
+
+.generation-progress-step-dot {
+  width: 10px;
+  height: 10px;
+  border: 1px solid #98a2b3;
+  background: #ffffff;
+}
+
+.generation-progress-step-active {
+  color: #344054;
+}
+
+.generation-progress-step-active .generation-progress-step-dot {
+  border-color: #111111;
+  background: #111111;
+}
+
+.generation-progress-step-complete {
+  color: #1c6b46;
+}
+
+.generation-progress-step-complete .generation-progress-step-dot {
+  border-color: #1c6b46;
+  background: #1c6b46;
+}
+
+.generation-progress-note {
+  margin-top: 18px !important;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  color: #667085 !important;
+  font-size: 10px;
+}
