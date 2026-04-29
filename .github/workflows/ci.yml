@@ -1,1 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  repository-check:
+    name: Repository sanity check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify repository files
+        run: |
+          echo "Repository checked out successfully."
+          echo "This CI workflow intentionally does not run the heavy solver stack."
+          echo "Render handles backend and solver deployment."
+          echo "Cloudflare handles frontend deployment."
+
+      - name: Check package manifests
+        shell: bash
+        run: |
+          if [ -f package.json ]; then
+            echo "Root package.json found."
+          else
+            echo "No root package.json found; skipping Node install."
+          fi
+
+          if [ -f services/solver-fenics/requirements.txt ]; then
+            echo "Python solver requirements file found."
+          else
+            echo "No solver requirements file found; skipping Python dependency install."
+          fi
+
+      - name: Validate key project paths
+        shell: bash
+        run: |
+          test -d apps/web && echo "apps/web found."
+          test -d services/generation-engine && echo "services/generation-engine found."
+          test -d services/solver-fenics && echo "services/solver-fenics found."
+
+      - name: Pass CI
+        run: |
+          echo "CI passed."
 
