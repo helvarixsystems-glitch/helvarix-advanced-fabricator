@@ -81,6 +81,9 @@ function App() {
   const [submittingGeneration, setSubmittingGeneration] = React.useState(false);
   const [submittingIteration, setSubmittingIteration] = React.useState(false);
   const [submittingExport, setSubmittingExport] = React.useState(false);
+  const [generationStartedAt, setGenerationStartedAt] = React.useState<number | null>(null);
+  const [generationElapsedMs, setGenerationElapsedMs] = React.useState(0);
+  const [generationNoticeDismissed, setGenerationNoticeDismissed] = React.useState(false);
 
   const [selectedFamily, setSelectedFamily] = React.useState<ComponentFamily>(
     componentRegistry[0].key
@@ -109,6 +112,18 @@ function App() {
 
   const validationMessages = displayGeneration?.result?.validations ?? [];
   const result = displayGeneration?.result ?? null;
+  const generationInProgress =
+    submittingGeneration ||
+    submittingIteration ||
+    displayGeneration?.status === "queued" ||
+    displayGeneration?.status === "running";
+  const generationProgress = getGenerationProgress({
+    status: displayGeneration?.status,
+    submitting: submittingGeneration || submittingIteration,
+    elapsedMs: generationElapsedMs,
+    result
+  });
+  const showGenerationProgress = generationInProgress && !generationNoticeDismissed;
 
   React.useEffect(() => {
     void loadWorkspace();
@@ -139,6 +154,28 @@ function App() {
 
     return () => window.clearInterval(timer);
   }, [generations, activeProjectId]);
+
+  React.useEffect(() => {
+    if (!generationInProgress) {
+      setGenerationStartedAt(null);
+      setGenerationElapsedMs(0);
+      setGenerationNoticeDismissed(false);
+      return;
+    }
+
+    setGenerationNoticeDismissed(false);
+    setGenerationStartedAt((current) => current ?? Date.now());
+  }, [generationInProgress]);
+
+  React.useEffect(() => {
+    if (!generationInProgress || generationStartedAt === null) return;
+
+    const tick = () => setGenerationElapsedMs(Date.now() - generationStartedAt);
+    tick();
+
+    const timer = window.setInterval(tick, 500);
+    return () => window.clearInterval(timer);
+  }, [generationInProgress, generationStartedAt]);
 
   async function loadWorkspace() {
     setLoadingWorkspace(true);
@@ -216,6 +253,9 @@ function App() {
     }
 
     setSubmittingGeneration(true);
+    setGenerationStartedAt(Date.now());
+    setGenerationElapsedMs(0);
+    setGenerationNoticeDismissed(false);
     setViewerMode("concept");
     setRightPanelTab("candidates");
 
@@ -260,6 +300,9 @@ function App() {
     }
 
     setSubmittingIteration(true);
+    setGenerationStartedAt(Date.now());
+    setGenerationElapsedMs(0);
+    setGenerationNoticeDismissed(false);
     setViewerMode("concept");
     setRightPanelTab("candidates");
 
@@ -1295,6 +1338,17 @@ function App() {
             </div>
           </WorkspacePanel>
         </main>
+
+        {showGenerationProgress ? (
+          <GenerationProgressOverlay
+            percent={generationProgress.percent}
+            title={generationProgress.title}
+            detail={generationProgress.detail}
+            elapsedMs={generationElapsedMs}
+            status={displayGeneration?.status ?? (submittingGeneration || submittingIteration ? "submitted" : "idle")}
+            onDismiss={() => setGenerationNoticeDismissed(true)}
+          />
+        ) : null}
       </div>
     </AppShell>
   );
@@ -1414,6 +1468,143 @@ function CandidateBar({ label, value, max }: { label: string; value: number; max
       </div>
     </div>
   );
+}
+
+function GenerationProgressOverlay(props: {
+  percent: number;
+  title: string;
+  detail: string;
+  elapsedMs: number;
+  status: string;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="generation-progress-backdrop" role="status" aria-live="polite">
+      <div className="generation-progress-card">
+        <div className="generation-progress-topline">
+          <span className="generation-progress-eyebrow">Solver pipeline active</span>
+          <button
+            type="button"
+            className="generation-progress-dismiss"
+            onClick={props.onDismiss}
+            aria-label="Hide generation progress overlay"
+          >
+            Hide
+          </button>
+        </div>
+
+        <h2>{props.title}</h2>
+        <p>{props.detail}</p>
+
+        <div className="generation-progress-meter" aria-label={`Generation progress ${props.percent}%`}>
+          <div
+            className="generation-progress-meter-fill"
+            style={{ width: `${props.percent}%` }}
+          />
+        </div>
+
+        <div className="generation-progress-meta">
+          <span>{props.percent}%</span>
+          <span>Status: {props.status.toUpperCase()}</span>
+          <span>Elapsed: {formatElapsedMs(props.elapsedMs)}</span>
+        </div>
+
+        <div className="generation-progress-steps">
+          <ProgressStep label="Submit requirements" active={props.percent >= 8} complete={props.percent > 18} />
+          <ProgressStep label="Run topology solver" active={props.percent >= 18} complete={props.percent > 62} />
+          <ProgressStep label="Extract render mesh" active={props.percent >= 62} complete={props.percent > 82} />
+          <ProgressStep label="Validate response" active={props.percent >= 82} complete={props.percent >= 96} />
+        </div>
+
+        <p className="generation-progress-note">
+          Fake preview geometry is disabled. If the solver fails, the viewer will keep showing
+          NO GEOMETRY PRODUCED instead of inventing a bracket.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function ProgressStep(props: { label: string; active: boolean; complete: boolean }) {
+  return (
+    <div
+      className={`generation-progress-step ${props.active ? "generation-progress-step-active" : ""} ${
+        props.complete ? "generation-progress-step-complete" : ""
+      }`}
+    >
+      <span className="generation-progress-step-dot" />
+      <span>{props.label}</span>
+    </div>
+  );
+}
+
+function getGenerationProgress(args: {
+  status?: string;
+  submitting: boolean;
+  elapsedMs: number;
+  result: GenerationResult | null;
+}) {
+  if (args.status === "completed" && args.result?.selectedCandidate?.renderMesh) {
+    return {
+      percent: 100,
+      title: "Solver mesh produced",
+      detail: "A real renderMesh was returned and selected."
+    };
+  }
+
+  if (args.status === "failed") {
+    return {
+      percent: 100,
+      title: "Generation failed",
+      detail: "The solver returned a failure. Check the Render logs and API response details."
+    };
+  }
+
+  if (args.status === "queued") {
+    return {
+      percent: 18,
+      title: "Generation queued",
+      detail: "The API accepted the request and is waiting for the solver worker."
+    };
+  }
+
+  if (args.status === "running") {
+    const runningPercent = Math.min(92, 28 + Math.floor(args.elapsedMs / 1200));
+
+    return {
+      percent: runningPercent,
+      title: "Running solver pipeline",
+      detail:
+        runningPercent < 62
+          ? "FEniCS/SIMP topology optimization is running. This can take a while on Render."
+          : runningPercent < 82
+            ? "The solver should be returning density data and the mesh extractor is preparing geometry."
+            : "Finalizing the renderMesh and waiting for the API to mark the generation complete."
+    };
+  }
+
+  if (args.submitting) {
+    return {
+      percent: 8,
+      title: "Submitting generation request",
+      detail: "Sending requirements to the generation API."
+    };
+  }
+
+  return {
+    percent: 0,
+    title: "Generation idle",
+    detail: "No active generation request."
+  };
+}
+
+function formatElapsedMs(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  if (minutes <= 0) return `${seconds}s`;
+  return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
 }
 
 function buildViewerGeometry(generation: GenerationSummary | null) {
